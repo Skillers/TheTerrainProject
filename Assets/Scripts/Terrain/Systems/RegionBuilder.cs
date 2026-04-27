@@ -130,10 +130,10 @@ namespace Terrain.Systems
             var graph = new RegionGraph();
             for (int r = 0; r < numRegions; r++)
             {
-                int minX = math.max(0,     mins[r].x - pad);
-                int minY = math.max(0,     mins[r].y - pad);
-                int maxX = math.min(W - 1, maxs[r].x + pad);
-                int maxY = math.min(H - 1, maxs[r].y + pad);
+                int minX = mins[r].x - pad;
+                int minY = mins[r].y - pad;
+                int maxX = maxs[r].x + pad;
+                int maxY = maxs[r].y + pad;
                 var rect = new RectInt(minX, minY, maxX - minX + 1, maxY - minY + 1);
                 graph.Add(new Region(r, rect));
             }

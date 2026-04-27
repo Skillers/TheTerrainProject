@@ -7,8 +7,8 @@ using UnityEngine;
 namespace Terrain.DebugViews
 {
     // One mesh per region — each quad samples its owning region's HeightMap for all four corners,
-    // giving a hard cliff at every region boundary. Bresenham edge overlays are drawn on top of the
-    // terrain surface using the same pairToCorners data as the quad (RegionDebugView) edges.
+    // giving a hard cliff at every region boundary. Edge overlays are continuous ribbon meshes whose
+    // height at each point is the average of both adjacent regions' padded HeightMap samples.
     public class HeightmapDebugView : MonoBehaviour
     {
         public bool regenerateOnStart = true;
@@ -20,7 +20,6 @@ namespace Terrain.DebugViews
         public bool showEdges = true;
         public Color edgeColor = new Color(1f, 0.55f, 0.05f, 1f);
         [Min(1)] public int edgeWidthPx = 2;
-        public float edgeHeight = 0f;
 
         private Transform _meshesRoot;
         private Transform _edgesRoot;
@@ -52,7 +51,6 @@ namespace Terrain.DebugViews
             var result   = data.BuildResult;
             float invPpu = 1f / TerrainDataSource.Instance.config.pixelsPerUnit;
             int W = result.Width, H = result.Height;
-
 
             // ── Region terrain meshes ─────────────────────────────────────────────
 
@@ -131,28 +129,28 @@ namespace Terrain.DebugViews
             EnsureEdgesRoot();
             ClearEdgeMeshes();
             if (showEdges)
-                BuildEdgeMeshes(result, data.PairToCorners, invPpu, W, H);
+                BuildEdgeMeshes(result, data.PairToCorners, invPpu);
 
             Debug.Log($"[HeightmapDebugView] seed={TerrainDataSource.Instance.config.seed}  regions={regionQuads.Count}  pixels={W}x{H}", this);
         }
 
-        // ── Edge mesh building ────────────────────────────────────────────────────
+        // ── Edge ribbon building ──────────────────────────────────────────────────
 
         private void BuildEdgeMeshes(RegionBuilder.Result result,
-            Dictionary<long, List<Vector2Int>> pairToCorners,
-            float invPpu, int W, int H)
+            Dictionary<long, List<Vector2Int>> pairToCorners, float invPpu)
         {
-            float halfW  = edgeWidthPx * invPpu * 0.5f;
-            var   mat    = GetOrCreateEdgeMat();
+            float ribbonHalfW = edgeWidthPx * invPpu * 0.5f;
+            var   mat         = GetOrCreateEdgeMat();
 
             foreach (var kv in pairToCorners)
             {
-                int a = (int)(kv.Key >> 32);
-                int b = (int)(kv.Key & 0xFFFFFFFFL);
+                int aId = (int)(kv.Key >> 32);
+                int bId = (int)(kv.Key & 0xFFFFFFFFL);
 
-                var biomeA = result.Graph.Get(a).Biome;
-                var biomeB = result.Graph.Get(b).Biome;
-                if (biomeA != null && biomeB != null && biomeA.type == biomeB.type) continue;
+                var regionA = result.Graph.Get(aId);
+                var regionB = result.Graph.Get(bId);
+                if (regionA.Biome != null && regionB.Biome != null &&
+                    regionA.Biome.type == regionB.Biome.type) continue;
 
                 var endpoints = kv.Value;
                 if (endpoints.Count < 2) continue;
@@ -163,25 +161,47 @@ namespace Terrain.DebugViews
                 var line = TerrainDataSource.Supercover(p1, p2);
                 if (line.Count < 2) continue;
 
-                var verts   = new Vector3[line.Count * 4];
-                var indices = new int[line.Count * 12];
-
+                // Build a center-line with averaged height from both regions' padded HeightMaps.
+                var centers = new Vector3[line.Count];
                 for (int i = 0; i < line.Count; i++)
                 {
                     int gx = line[i].x, gy = line[i].y;
-                    float cx = gx * invPpu, cz = gy * invPpu;
+                    float hA = SampleRegionAt(regionA, gx, gy);
+                    float hB = SampleRegionAt(regionB, gx, gy);
+                    centers[i] = new Vector3(gx * invPpu, (hA + hB) * 0.5f, gy * invPpu);
+                }
 
-                    int v = i * 4, t = i * 12;
-                    verts[v + 0] = new Vector3(cx - halfW, edgeHeight, cz - halfW);
-                    verts[v + 1] = new Vector3(cx + halfW, edgeHeight, cz - halfW);
-                    verts[v + 2] = new Vector3(cx - halfW, edgeHeight, cz + halfW);
-                    verts[v + 3] = new Vector3(cx + halfW, edgeHeight, cz + halfW);
+                // Ribbon: two edge vertices per center point, quads connecting consecutive points.
+                int n      = centers.Length;
+                var verts  = new Vector3[n * 2];
+                var tris   = new List<int>((n - 1) * 12);
 
-                    // two-sided so it's visible from all camera angles
-                    indices[t]      = v;     indices[t + 1]  = v + 1; indices[t + 2]  = v + 2;
-                    indices[t + 3]  = v + 2; indices[t + 4]  = v + 1; indices[t + 5]  = v + 3;
-                    indices[t + 6]  = v;     indices[t + 7]  = v + 2; indices[t + 8]  = v + 1;
-                    indices[t + 9]  = v + 2; indices[t + 10] = v + 3; indices[t + 11] = v + 1;
+                for (int i = 0; i < n; i++)
+                {
+                    // Direction along the line — use neighbours for a smoother perpendicular.
+                    Vector3 dir;
+                    if      (i == 0)     dir = centers[1]     - centers[0];
+                    else if (i == n - 1) dir = centers[n - 1] - centers[n - 2];
+                    else                 dir = centers[i + 1] - centers[i - 1];
+
+                    // Perpendicular in XZ only so the ribbon stays flat (no tilt from height change).
+                    var perp = new Vector3(dir.z, 0f, -dir.x);
+                    if (perp.sqrMagnitude > 1e-6f) perp.Normalize();
+                    else perp = Vector3.right;
+
+                    verts[i * 2 + 0] = centers[i] + perp * ribbonHalfW;
+                    verts[i * 2 + 1] = centers[i] - perp * ribbonHalfW;
+
+                    if (i < n - 1)
+                    {
+                        int v = i * 2;
+                        // front face
+                        tris.Add(v);     tris.Add(v + 1); tris.Add(v + 2);
+                        tris.Add(v + 2); tris.Add(v + 1); tris.Add(v + 3);
+                        // back face (two-sided)
+                        tris.Add(v);     tris.Add(v + 2); tris.Add(v + 1);
+                        tris.Add(v + 2); tris.Add(v + 3); tris.Add(v + 1);
+                    }
                 }
 
                 var mesh = new Mesh { hideFlags = HideFlags.DontSave };
@@ -189,14 +209,27 @@ namespace Terrain.DebugViews
                     ? UnityEngine.Rendering.IndexFormat.UInt32
                     : UnityEngine.Rendering.IndexFormat.UInt16;
                 mesh.SetVertices(verts);
-                mesh.SetIndices(indices, MeshTopology.Triangles, 0);
+                mesh.SetTriangles(tris, 0);
+                mesh.RecalculateNormals();
                 mesh.RecalculateBounds();
 
-                var go = new GameObject($"Edge_{a}_{b}");
+                var go = new GameObject($"Edge_{aId}_{bId}");
                 go.transform.SetParent(_edgesRoot, false);
                 go.AddComponent<MeshFilter>().sharedMesh = mesh;
                 go.AddComponent<MeshRenderer>().sharedMaterial = mat;
             }
+        }
+
+        // Samples a region's padded HeightMap at world pixel (wx, wy).
+        // Both adjacent regions have valid data at the boundary thanks to the padding.
+        private static float SampleRegionAt(Region region, int wx, int wy)
+        {
+            if (region.HeightMap == null) return 0f;
+            var bounds = region.BoundsPx;
+            int lx = wx - bounds.xMin;
+            int ly = wy - bounds.yMin;
+            if (lx < 0 || lx >= bounds.width || ly < 0 || ly >= bounds.height) return 0f;
+            return region.HeightMap[lx, ly];
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────
