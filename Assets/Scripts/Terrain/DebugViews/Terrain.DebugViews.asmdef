@@ -1,0 +1,20 @@
+{
+    "name": "Terrain.DebugViews",
+    "rootNamespace": "Terrain.DebugViews",
+    "references": [
+        "Terrain.Core",
+        "Terrain.Data",
+        "Terrain.Biomes",
+        "Terrain.Algorithms",
+        "Terrain.Systems"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

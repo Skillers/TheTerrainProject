@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f9db6647b80c36a4bbf524630c2305f5, type: 3}
+  m_Name: WorldConfig
+  m_EditorClassIdentifier: Terrain.Core::Terrain.Core.WorldConfig
+  seed: 0
+  worldSizeInBiomes: {x: 4, y: 4}
+  biomeSize: 32
+  pixelsPerUnit: 2
+  biomeSeedFillRate: 0.9
+  seedMergeDistance: 0
+  worldBaseScale: 0.005
+  worldBaseAmplitude: 2
+  heightmapPaddingFraction: 0.3
