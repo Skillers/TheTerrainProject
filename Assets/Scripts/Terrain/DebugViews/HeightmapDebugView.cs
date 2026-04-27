@@ -1,140 +1,160 @@
 using System.Collections.Generic;
 using Terrain.Biomes;
-using Terrain.Core;
 using Terrain.Data;
 using Terrain.Systems;
 using UnityEngine;
 
 namespace Terrain.DebugViews
 {
-    // M3 visual exit criterion: one flat-shaded mesh per region, vertices elevated by HeightMap[x,y].
-    // No blending across boundaries — adjacent biomes will show hard seams. That's correct for M3;
-    // M4's EdgeBlender is what makes them disappear. Right-click component header → Regenerate.
-    //
-    // Vertices are placed in world units: X = pixel_x / pixelsPerUnit,  Y = pixel_y / pixelsPerUnit,
-    // Z = raw height value.  Place this GameObject at the world origin (0,0,0) with identity rotation
-    // and scale so the mesh sits in the same coordinate space as any other world-unit debug geometry.
+    // One mesh per region. Every quad is assigned to the region that owns the majority of its four
+    // corners. Heights for all four corners are sampled from that region's own HeightMap, so
+    // adjacent regions that disagree on height produce a clean hard cliff — no shared vertices,
+    // no height bleed across region boundaries.
     public class HeightmapDebugView : MonoBehaviour
     {
-        public WorldConfig config;
-        public BiomeProfile[] biomePool;
         public bool regenerateOnStart = true;
-        public bool advanceSeedEachRegenerate = false;
 
         [Header("Rendering")]
         public Material sharedMaterial;
-        public bool flatShaded = true;
 
         private Transform _meshesRoot;
         private Material _fallbackMat;
 
         private void Start()
         {
-            if (regenerateOnStart) Regenerate();
+            if (TerrainDataSource.Instance != null && TerrainDataSource.Instance.regenerateOnStart)
+                Regenerate();
         }
 
         [ContextMenu("Regenerate")]
         public void Regenerate()
         {
-            if (config == null)
+            if (TerrainDataSource.Instance == null)
             {
-                Debug.LogError("[HeightmapDebugView] Assign a WorldConfig asset.", this);
+                Debug.LogError("[HeightmapDebugView] No TerrainDataSource found in scene.", this);
                 return;
             }
-            if (advanceSeedEachRegenerate) config.seed++;
+            TerrainDataSource.Instance.Regenerate();
+            Rebuild();
+        }
 
-            var result = RegionBuilder.Build(config);
-            BiomeAssigner.Assign(result.Graph, biomePool, config.seed);
-            HeightmapBuilder.BuildAll(result.Graph, config);
+        public void Rebuild()
+        {
+            if (TerrainDataSource.Instance?.Data == null) return;
+            var result   = TerrainDataSource.Instance.Data.BuildResult;
+            float invPpu = 1f / TerrainDataSource.Instance.config.pixelsPerUnit;
+            int W = result.Width, H = result.Height;
+
+            // Assign each quad to the region owning the most of its four corners.
+            var regionQuads = new Dictionary<int, List<Vector2Int>>();
+
+            for (int wy = 0; wy < H - 1; wy++)
+            for (int wx = 0; wx < W - 1; wx++)
+            {
+                int r00 = result.PixelOwners[ wy      * W + wx    ];
+                int r10 = result.PixelOwners[ wy      * W + wx + 1];
+                int r01 = result.PixelOwners[(wy + 1) * W + wx    ];
+                int r11 = result.PixelOwners[(wy + 1) * W + wx + 1];
+
+                int dominant = DominantRegion(r00, r10, r01, r11);
+                if (dominant < 0) continue;
+
+                if (!regionQuads.TryGetValue(dominant, out var list))
+                    regionQuads[dominant] = list = new List<Vector2Int>();
+                list.Add(new Vector2Int(wx, wy));
+            }
 
             EnsureMeshesRoot();
             ClearMeshes();
 
-            for (int r = 0; r < result.Graph.Count; r++)
+            foreach (var kv in regionQuads)
             {
-                var region = result.Graph.Get(r);
-                if (region.HeightMap == null) continue;
-                BuildRegionMesh(region, result.PixelOwners, result.Width, result.Height);
-            }
+                int regionId = kv.Key;
+                var region   = result.Graph.Get(regionId);
+                if (region.Biome == null || region.HeightMap == null) continue;
 
-            Debug.Log($"[HeightmapDebugView] seed={config.seed}  regions={result.Graph.Count}  pixels={result.Width}x{result.Height}", this);
-        }
+                var quads  = kv.Value;
+                var bounds = region.BoundsPx;
 
-        private void BuildRegionMesh(Region region, int[] pixelOwners, int worldWidth, int worldHeight)
-        {
-            float invPpu = 1f / config.pixelsPerUnit;
-            var bounds = region.BoundsPx;
-            int rw = bounds.width;
-            int rh = bounds.height;
+                // Flat-shaded: 6 unique vertices per quad — no sharing across or within region.
+                // This guarantees a hard edge at every region boundary.
+                var verts = new Vector3[quads.Count * 6];
+                var tris  = new int[quads.Count * 6];
 
-            var vertexIndex = new int[rw * rh];
-            for (int i = 0; i < vertexIndex.Length; i++) vertexIndex[i] = -1;
-
-            var verts = new List<Vector3>();
-            for (int y = 0; y < rh; y++)
-            for (int x = 0; x < rw; x++)
-            {
-                int wx = bounds.xMin + x;
-                int wy = bounds.yMin + y;
-                if (pixelOwners[wy * worldWidth + wx] != region.Id) continue;
-
-                vertexIndex[y * rw + x] = verts.Count;
-                verts.Add(new Vector3(wx * invPpu, region.HeightMap[x, y], wy * invPpu));
-            }
-
-            if (verts.Count == 0) return;
-
-            var tris = new List<int>();
-            for (int y = 0; y < rh - 1; y++)
-            for (int x = 0; x < rw - 1; x++)
-            {
-                int i00 = vertexIndex[y * rw + x];
-                int i10 = vertexIndex[y * rw + x + 1];
-                int i01 = vertexIndex[(y + 1) * rw + x];
-                int i11 = vertexIndex[(y + 1) * rw + x + 1];
-                if (i00 < 0 || i10 < 0 || i01 < 0 || i11 < 0) continue;
-                tris.Add(i00); tris.Add(i01); tris.Add(i10);
-                tris.Add(i10); tris.Add(i01); tris.Add(i11);
-            }
-
-            if (tris.Count == 0) return;
-
-            Mesh mesh;
-            if (flatShaded)
-            {
-                var flatVerts = new Vector3[tris.Count];
-                var flatTris  = new int[tris.Count];
-                for (int i = 0; i < tris.Count; i++)
+                for (int i = 0; i < quads.Count; i++)
                 {
-                    flatVerts[i] = verts[tris[i]];
-                    flatTris[i]  = i;
+                    int qx = quads[i].x, qy = quads[i].y;
+
+                    float h00 = SampleHeight(region, bounds, qx,     qy    );
+                    float h10 = SampleHeight(region, bounds, qx + 1, qy    );
+                    float h01 = SampleHeight(region, bounds, qx,     qy + 1);
+                    float h11 = SampleHeight(region, bounds, qx + 1, qy + 1);
+
+                    var v00 = new Vector3( qx      * invPpu, h00,  qy      * invPpu);
+                    var v10 = new Vector3((qx + 1) * invPpu, h10,  qy      * invPpu);
+                    var v01 = new Vector3( qx      * invPpu, h01, (qy + 1) * invPpu);
+                    var v11 = new Vector3((qx + 1) * invPpu, h11, (qy + 1) * invPpu);
+
+                    int b = i * 6;
+                    verts[b]     = v00; tris[b]     = b;
+                    verts[b + 1] = v01; tris[b + 1] = b + 1;
+                    verts[b + 2] = v10; tris[b + 2] = b + 2;
+                    verts[b + 3] = v10; tris[b + 3] = b + 3;
+                    verts[b + 4] = v01; tris[b + 4] = b + 4;
+                    verts[b + 5] = v11; tris[b + 5] = b + 5;
                 }
-                mesh = new Mesh { hideFlags = HideFlags.DontSave };
-                mesh.indexFormat = flatVerts.Length > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
-                mesh.SetVertices(flatVerts);
-                mesh.SetTriangles(flatTris, 0);
-            }
-            else
-            {
-                mesh = new Mesh { hideFlags = HideFlags.DontSave };
-                mesh.indexFormat = verts.Count > 65535 ? UnityEngine.Rendering.IndexFormat.UInt32 : UnityEngine.Rendering.IndexFormat.UInt16;
+
+                var mesh = new Mesh { hideFlags = HideFlags.DontSave };
+                mesh.indexFormat = verts.Length > 65535
+                    ? UnityEngine.Rendering.IndexFormat.UInt32
+                    : UnityEngine.Rendering.IndexFormat.UInt16;
                 mesh.SetVertices(verts);
                 mesh.SetTriangles(tris, 0);
-            }
-            mesh.RecalculateNormals();
-            mesh.RecalculateBounds();
+                mesh.RecalculateNormals();
+                mesh.RecalculateBounds();
 
-            var go = new GameObject($"HeightRegion_{region.Id}");
-            go.transform.SetParent(_meshesRoot, false);
-            var mf = go.AddComponent<MeshFilter>();
-            mf.sharedMesh = mesh;
-            var mr = go.AddComponent<MeshRenderer>();
-            mr.sharedMaterial = ResolveMaterial(region.Biome);
+                var go = new GameObject($"HeightRegion_{regionId}_{region.Biome.displayName}");
+                go.transform.SetParent(_meshesRoot, false);
+                go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                go.AddComponent<MeshRenderer>().sharedMaterial = ResolveMaterial(region.Biome.debugColor);
+            }
+
+            Debug.Log($"[HeightmapDebugView] seed={TerrainDataSource.Instance.config.seed}  regions={regionQuads.Count}  pixels={W}x{H}", this);
         }
 
-        private Material ResolveMaterial(BiomeProfile biome)
+        // Sample this region's HeightMap at world pixel (wx, wy). Falls back to 0 only if the
+        // pixel lies outside the padded bounds — shouldn't happen for boundary quad corners.
+        private static float SampleHeight(Region region, RectInt bounds, int wx, int wy)
         {
-            if (sharedMaterial != null) return sharedMaterial;
+            int lx = wx - bounds.xMin;
+            int ly = wy - bounds.yMin;
+            if (lx < 0 || lx >= bounds.width || ly < 0 || ly >= bounds.height) return 0f;
+            return region.HeightMap[lx, ly];
+        }
+
+        // The region owning the most corners of a quad. Returns -1 if all corners are unassigned.
+        private static int DominantRegion(int r00, int r10, int r01, int r11)
+        {
+            int best = -1, bestCount = 0;
+            int[] c = { r00, r10, r01, r11 };
+            for (int i = 0; i < 4; i++)
+            {
+                if (c[i] < 0) continue;
+                int count = 0;
+                for (int j = 0; j < 4; j++) if (c[j] == c[i]) count++;
+                if (count > bestCount) { bestCount = count; best = c[i]; }
+            }
+            return best;
+        }
+
+        private Material ResolveMaterial(Color tint)
+        {
+            if (sharedMaterial != null)
+            {
+                var inst = new Material(sharedMaterial) { hideFlags = HideFlags.DontSave };
+                ApplyColor(inst, tint);
+                return inst;
+            }
             if (_fallbackMat == null)
             {
                 var shader = Shader.Find("Universal Render Pipeline/Lit");
@@ -143,10 +163,14 @@ namespace Terrain.DebugViews
                 _fallbackMat = new Material(shader) { hideFlags = HideFlags.DontSave };
             }
             var mat = new Material(_fallbackMat) { hideFlags = HideFlags.DontSave };
-            Color c = biome != null ? biome.debugColor : Color.gray;
+            ApplyColor(mat, tint);
+            return mat;
+        }
+
+        private static void ApplyColor(Material mat, Color c)
+        {
             if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", c);
             else mat.color = c;
-            return mat;
         }
 
         private void EnsureMeshesRoot()
