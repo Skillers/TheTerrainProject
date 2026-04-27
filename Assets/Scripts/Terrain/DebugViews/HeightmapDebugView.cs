@@ -6,10 +6,9 @@ using UnityEngine;
 
 namespace Terrain.DebugViews
 {
-    // One mesh per region. Every quad is assigned to the region that owns the majority of its four
-    // corners. Heights for all four corners are sampled from that region's own HeightMap, so
-    // adjacent regions that disagree on height produce a clean hard cliff — no shared vertices,
-    // no height bleed across region boundaries.
+    // One mesh per region — each quad samples its owning region's HeightMap for all four corners,
+    // giving a hard cliff at every region boundary. Bresenham edge overlays are drawn on top of the
+    // terrain surface using the same pairToCorners data as the quad (RegionDebugView) edges.
     public class HeightmapDebugView : MonoBehaviour
     {
         public bool regenerateOnStart = true;
@@ -17,8 +16,16 @@ namespace Terrain.DebugViews
         [Header("Rendering")]
         public Material sharedMaterial;
 
+        [Header("Edges")]
+        public bool showEdges = true;
+        public Color edgeColor = new Color(1f, 0.55f, 0.05f, 1f);
+        [Min(1)] public int edgeWidthPx = 2;
+        public float edgeHeight = 0f;
+
         private Transform _meshesRoot;
+        private Transform _edgesRoot;
         private Material _fallbackMat;
+        private Material _edgeMat;
 
         private void Start()
         {
@@ -41,13 +48,15 @@ namespace Terrain.DebugViews
         public void Rebuild()
         {
             if (TerrainDataSource.Instance?.Data == null) return;
-            var result   = TerrainDataSource.Instance.Data.BuildResult;
+            var data     = TerrainDataSource.Instance.Data;
+            var result   = data.BuildResult;
             float invPpu = 1f / TerrainDataSource.Instance.config.pixelsPerUnit;
             int W = result.Width, H = result.Height;
 
-            // Assign each quad to the region owning the most of its four corners.
-            var regionQuads = new Dictionary<int, List<Vector2Int>>();
 
+            // ── Region terrain meshes ─────────────────────────────────────────────
+
+            var regionQuads = new Dictionary<int, List<Vector2Int>>();
             for (int wy = 0; wy < H - 1; wy++)
             for (int wx = 0; wx < W - 1; wx++)
             {
@@ -76,8 +85,6 @@ namespace Terrain.DebugViews
                 var quads  = kv.Value;
                 var bounds = region.BoundsPx;
 
-                // Flat-shaded: 6 unique vertices per quad — no sharing across or within region.
-                // This guarantees a hard edge at every region boundary.
                 var verts = new Vector3[quads.Count * 6];
                 var tris  = new int[quads.Count * 6];
 
@@ -119,11 +126,81 @@ namespace Terrain.DebugViews
                 go.AddComponent<MeshRenderer>().sharedMaterial = ResolveMaterial(region.Biome.debugColor);
             }
 
+            // ── Edge overlays ─────────────────────────────────────────────────────
+
+            EnsureEdgesRoot();
+            ClearEdgeMeshes();
+            if (showEdges)
+                BuildEdgeMeshes(result, data.PairToCorners, invPpu, W, H);
+
             Debug.Log($"[HeightmapDebugView] seed={TerrainDataSource.Instance.config.seed}  regions={regionQuads.Count}  pixels={W}x{H}", this);
         }
 
-        // Sample this region's HeightMap at world pixel (wx, wy). Falls back to 0 only if the
-        // pixel lies outside the padded bounds — shouldn't happen for boundary quad corners.
+        // ── Edge mesh building ────────────────────────────────────────────────────
+
+        private void BuildEdgeMeshes(RegionBuilder.Result result,
+            Dictionary<long, List<Vector2Int>> pairToCorners,
+            float invPpu, int W, int H)
+        {
+            float halfW  = edgeWidthPx * invPpu * 0.5f;
+            var   mat    = GetOrCreateEdgeMat();
+
+            foreach (var kv in pairToCorners)
+            {
+                int a = (int)(kv.Key >> 32);
+                int b = (int)(kv.Key & 0xFFFFFFFFL);
+
+                var biomeA = result.Graph.Get(a).Biome;
+                var biomeB = result.Graph.Get(b).Biome;
+                if (biomeA != null && biomeB != null && biomeA.type == biomeB.type) continue;
+
+                var endpoints = kv.Value;
+                if (endpoints.Count < 2) continue;
+                var p1 = TerrainDataSource.FindFurthest(endpoints, endpoints[0]);
+                var p2 = TerrainDataSource.FindFurthest(endpoints, p1);
+                if (p1 == p2) continue;
+
+                var line = TerrainDataSource.Supercover(p1, p2);
+                if (line.Count < 2) continue;
+
+                var verts   = new Vector3[line.Count * 4];
+                var indices = new int[line.Count * 12];
+
+                for (int i = 0; i < line.Count; i++)
+                {
+                    int gx = line[i].x, gy = line[i].y;
+                    float cx = gx * invPpu, cz = gy * invPpu;
+
+                    int v = i * 4, t = i * 12;
+                    verts[v + 0] = new Vector3(cx - halfW, edgeHeight, cz - halfW);
+                    verts[v + 1] = new Vector3(cx + halfW, edgeHeight, cz - halfW);
+                    verts[v + 2] = new Vector3(cx - halfW, edgeHeight, cz + halfW);
+                    verts[v + 3] = new Vector3(cx + halfW, edgeHeight, cz + halfW);
+
+                    // two-sided so it's visible from all camera angles
+                    indices[t]      = v;     indices[t + 1]  = v + 1; indices[t + 2]  = v + 2;
+                    indices[t + 3]  = v + 2; indices[t + 4]  = v + 1; indices[t + 5]  = v + 3;
+                    indices[t + 6]  = v;     indices[t + 7]  = v + 2; indices[t + 8]  = v + 1;
+                    indices[t + 9]  = v + 2; indices[t + 10] = v + 3; indices[t + 11] = v + 1;
+                }
+
+                var mesh = new Mesh { hideFlags = HideFlags.DontSave };
+                mesh.indexFormat = verts.Length > 65535
+                    ? UnityEngine.Rendering.IndexFormat.UInt32
+                    : UnityEngine.Rendering.IndexFormat.UInt16;
+                mesh.SetVertices(verts);
+                mesh.SetIndices(indices, MeshTopology.Triangles, 0);
+                mesh.RecalculateBounds();
+
+                var go = new GameObject($"Edge_{a}_{b}");
+                go.transform.SetParent(_edgesRoot, false);
+                go.AddComponent<MeshFilter>().sharedMesh = mesh;
+                go.AddComponent<MeshRenderer>().sharedMaterial = mat;
+            }
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────────
+
         private static float SampleHeight(Region region, RectInt bounds, int wx, int wy)
         {
             int lx = wx - bounds.xMin;
@@ -132,7 +209,6 @@ namespace Terrain.DebugViews
             return region.HeightMap[lx, ly];
         }
 
-        // The region owning the most corners of a quad. Returns -1 if all corners are unassigned.
         private static int DominantRegion(int r00, int r10, int r01, int r11)
         {
             int best = -1, bestCount = 0;
@@ -145,6 +221,31 @@ namespace Terrain.DebugViews
                 if (count > bestCount) { bestCount = count; best = c[i]; }
             }
             return best;
+        }
+
+        // ── Material helpers ──────────────────────────────────────────────────────
+
+        private Material GetOrCreateEdgeMat()
+        {
+            if (_edgeMat == null)
+            {
+                var shader = Shader.Find("Universal Render Pipeline/Unlit");
+                if (shader == null) shader = Shader.Find("Unlit/Color");
+                _edgeMat = new Material(shader)
+                {
+                    hideFlags   = HideFlags.DontSave,
+                    renderQueue = 4000,
+                };
+                if (_edgeMat.HasProperty("_ZTest"))
+                    _edgeMat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+                if (_edgeMat.HasProperty("_ZWrite"))
+                    _edgeMat.SetInt("_ZWrite", 0);
+                if (_edgeMat.HasProperty("_Cull"))
+                    _edgeMat.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+            }
+            if (_edgeMat.HasProperty("_BaseColor")) _edgeMat.SetColor("_BaseColor", edgeColor);
+            else                                    _edgeMat.color = edgeColor;
+            return _edgeMat;
         }
 
         private Material ResolveMaterial(Color tint)
@@ -173,6 +274,8 @@ namespace Terrain.DebugViews
             else mat.color = c;
         }
 
+        // ── Scene object management ───────────────────────────────────────────────
+
         private void EnsureMeshesRoot()
         {
             if (_meshesRoot != null) return;
@@ -194,6 +297,28 @@ namespace Terrain.DebugViews
                 var mr = child.GetComponent<MeshRenderer>();
                 if (mr != null && mr.sharedMaterial != null && mr.sharedMaterial != sharedMaterial)
                     SafeDestroy(mr.sharedMaterial);
+                SafeDestroy(child.gameObject);
+            }
+        }
+
+        private void EnsureEdgesRoot()
+        {
+            if (_edgesRoot != null) return;
+            string rootName = $"HeightEdges ({gameObject.name})";
+            var found = transform.Find(rootName);
+            if (found != null) { _edgesRoot = found; return; }
+            var go = new GameObject(rootName);
+            go.transform.SetParent(transform, false);
+            _edgesRoot = go.transform;
+        }
+
+        private void ClearEdgeMeshes()
+        {
+            for (int i = _edgesRoot.childCount - 1; i >= 0; i--)
+            {
+                var child = _edgesRoot.GetChild(i);
+                var mf = child.GetComponent<MeshFilter>();
+                if (mf != null && mf.sharedMesh != null) SafeDestroy(mf.sharedMesh);
                 SafeDestroy(child.gameObject);
             }
         }
