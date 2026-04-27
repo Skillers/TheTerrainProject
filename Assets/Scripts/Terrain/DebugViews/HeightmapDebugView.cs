@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Terrain.Algorithms;
 using Terrain.Biomes;
 using Terrain.Data;
 using Terrain.Systems;
@@ -19,7 +20,7 @@ namespace Terrain.DebugViews
         [Header("Edges")]
         public bool showEdges = true;
         public Color edgeColor = new Color(1f, 0.55f, 0.05f, 1f);
-        [Min(1)] public int edgeWidthPx = 2;
+        [Range(0f, 1f)] public float bandFractionOfBiome = 0.15f;
 
         private Transform _meshesRoot;
         private Transform _edgesRoot;
@@ -139,8 +140,11 @@ namespace Terrain.DebugViews
         private void BuildEdgeMeshes(RegionBuilder.Result result,
             Dictionary<long, List<Vector2Int>> pairToCorners, float invPpu)
         {
-            float ribbonHalfW = edgeWidthPx * invPpu * 0.5f;
-            var   mat         = GetOrCreateEdgeMat();
+            int biomeSize = TerrainDataSource.Instance.config.biomeSize;
+            int N = Mathf.Max(0, Mathf.RoundToInt(biomeSize * bandFractionOfBiome));
+            if (N == 0) return;
+            int crossCount = 2 * N + 1; // -N..-1, 0, +1..+N
+            var mat = GetOrCreateEdgeMat();
 
             foreach (var kv in pairToCorners)
             {
@@ -154,54 +158,69 @@ namespace Terrain.DebugViews
 
                 var endpoints = kv.Value;
                 if (endpoints.Count < 2) continue;
-                var p1 = TerrainDataSource.FindFurthest(endpoints, endpoints[0]);
-                var p2 = TerrainDataSource.FindFurthest(endpoints, p1);
+                var p1 = LineRaster.FindFurthest(endpoints, endpoints[0]);
+                var p2 = LineRaster.FindFurthest(endpoints, p1);
                 if (p1 == p2) continue;
 
-                var line = TerrainDataSource.Supercover(p1, p2);
+                var line = LineRaster.Supercover(p1, p2);
                 if (line.Count < 2) continue;
 
-                // Build a center-line with averaged height from both regions' padded HeightMaps.
-                var centers = new Vector3[line.Count];
-                for (int i = 0; i < line.Count; i++)
-                {
-                    int gx = line[i].x, gy = line[i].y;
-                    float hA = SampleRegionAt(regionA, gx, gy);
-                    float hB = SampleRegionAt(regionB, gx, gy);
-                    centers[i] = new Vector3(gx * invPpu, (hA + hB) * 0.5f, gy * invPpu);
-                }
+                // Edge tangent + perpendicular are constant along this straight supercover line.
+                Vector2 dir = new Vector2(p2.x - p1.x, p2.y - p1.y);
+                if (dir.sqrMagnitude < 1e-6f) continue;
+                dir.Normalize();
+                Vector2 perp = new Vector2(-dir.y, dir.x);
 
-                // Ribbon: two edge vertices per center point, quads connecting consecutive points.
-                int n      = centers.Length;
-                var verts  = new Vector3[n * 2];
-                var tris   = new List<int>((n - 1) * 12);
+                // Pre-walk the perpendicular as supercover and capture the first N step pixels
+                // on each side. Same offsets get reused for every centerline pixel.
+                var posSteps = SupercoverSteps(perp,  N);
+                var negSteps = SupercoverSteps(-perp, N);
+
+                int n = line.Count;
+                var verts = new Vector3[n * crossCount];
+                var tris  = new List<int>((n - 1) * (crossCount - 1) * 12);
 
                 for (int i = 0; i < n; i++)
                 {
-                    // Direction along the line — use neighbours for a smoother perpendicular.
-                    Vector3 dir;
-                    if      (i == 0)     dir = centers[1]     - centers[0];
-                    else if (i == n - 1) dir = centers[n - 1] - centers[n - 2];
-                    else                 dir = centers[i + 1] - centers[i - 1];
+                    int ex = line[i].x, ey = line[i].y;
+                    float hA = SampleRegionAt(regionA, ex, ey);
+                    float hB = SampleRegionAt(regionB, ex, ey);
+                    float h  = (hA + hB) * 0.5f;
+                    int rowBase = i * crossCount;
 
-                    // Perpendicular in XZ only so the ribbon stays flat (no tilt from height change).
-                    var perp = new Vector3(dir.z, 0f, -dir.x);
-                    if (perp.sqrMagnitude > 1e-6f) perp.Normalize();
-                    else perp = Vector3.right;
-
-                    verts[i * 2 + 0] = centers[i] + perp * ribbonHalfW;
-                    verts[i * 2 + 1] = centers[i] - perp * ribbonHalfW;
-
-                    if (i < n - 1)
+                    // -N .. -1 (negative side, outermost first)
+                    for (int s = N; s >= 1; s--)
                     {
-                        int v = i * 2;
-                        // front face
-                        tris.Add(v);     tris.Add(v + 1); tris.Add(v + 2);
-                        tris.Add(v + 2); tris.Add(v + 1); tris.Add(v + 3);
-                        // back face (two-sided)
-                        tris.Add(v);     tris.Add(v + 2); tris.Add(v + 1);
-                        tris.Add(v + 2); tris.Add(v + 3); tris.Add(v + 1);
+                        Vector2Int off = negSteps[s - 1];
+                        verts[rowBase + (N - s)] =
+                            new Vector3((ex + off.x) * invPpu, h, (ey + off.y) * invPpu);
                     }
+
+                    // 0 (centerline)
+                    verts[rowBase + N] = new Vector3(ex * invPpu, h, ey * invPpu);
+
+                    // +1 .. +N
+                    for (int s = 1; s <= N; s++)
+                    {
+                        Vector2Int off = posSteps[s - 1];
+                        verts[rowBase + (N + s)] =
+                            new Vector3((ex + off.x) * invPpu, h, (ey + off.y) * invPpu);
+                    }
+                }
+
+                for (int i = 0; i < n - 1; i++)
+                for (int j = 0; j < crossCount - 1; j++)
+                {
+                    int v00 = i       * crossCount + j;
+                    int v10 = i       * crossCount + j + 1;
+                    int v01 = (i + 1) * crossCount + j;
+                    int v11 = (i + 1) * crossCount + j + 1;
+                    // front
+                    tris.Add(v00); tris.Add(v01); tris.Add(v10);
+                    tris.Add(v10); tris.Add(v01); tris.Add(v11);
+                    // back (two-sided)
+                    tris.Add(v00); tris.Add(v10); tris.Add(v01);
+                    tris.Add(v10); tris.Add(v11); tris.Add(v01);
                 }
 
                 var mesh = new Mesh { hideFlags = HideFlags.DontSave };
@@ -218,6 +237,32 @@ namespace Terrain.DebugViews
                 go.AddComponent<MeshFilter>().sharedMesh = mesh;
                 go.AddComponent<MeshRenderer>().sharedMaterial = mat;
             }
+        }
+
+        // Walks supercover from (0,0) along dirUnit and returns the first n step pixels
+        // (excluding origin). If the synthetic target doesn't yield enough pixels, pads
+        // with the last produced offset.
+        private static Vector2Int[] SupercoverSteps(Vector2 dirUnit, int n)
+        {
+            var steps = new Vector2Int[n];
+            if (n <= 0) return steps;
+            int reach = n + 4;
+            var origin = Vector2Int.zero;
+            var target = new Vector2Int(
+                Mathf.RoundToInt(dirUnit.x * reach),
+                Mathf.RoundToInt(dirUnit.y * reach));
+            if (target == origin)
+            {
+                for (int i = 0; i < n; i++) steps[i] = origin;
+                return steps;
+            }
+            var pixels = LineRaster.Supercover(origin, target);
+            int idx = 0;
+            for (int i = 1; i < pixels.Count && idx < n; i++)
+                steps[idx++] = pixels[i];
+            for (; idx < n; idx++)
+                steps[idx] = idx > 0 ? steps[idx - 1] : origin;
+            return steps;
         }
 
         // Samples a region's padded HeightMap at world pixel (wx, wy).
