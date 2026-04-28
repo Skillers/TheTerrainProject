@@ -5,30 +5,35 @@ using UnityEngine;
 
 namespace Terrain.Systems
 {
-    // For each region pair, produces three Bresenham edges:
+    // For each region pair, produces a base Bresenham edge plus N depth layers on
+    // each side:
     //   depth 0  base line  — corner-to-corner straight line (tag side 0)
-    //   depth 1  side A     — base shifted by +PerpStep, snapped to pixels (tag side 1)
-    //   depth 1  side B     — base shifted by -PerpStep, snapped to pixels (tag side 2)
-    // Pixels are deduplicated across the three lines via a per-pair dictionary keyed on
-    // (x, y). First write wins, so a depth-1 pixel that lands on an existing depth-0
-    // pixel is skipped. Depth-1 pixels copy their height from the nearest base pixel
-    // (Euclidean), depth-0 pixels take the average of the two regions' heightmaps.
+    //   depth k  side A     — base shifted by +k*PerpStep, snapped to pixels (tag side 1)
+    //   depth k  side B     — base shifted by -k*PerpStep, snapped to pixels (tag side 2)
+    // Pixels are deduplicated across all lines via a per-pair dictionary keyed on
+    // (x, y). First write wins, so a deeper pixel that lands on an existing one is
+    // skipped. Depth-N pixels copy their height from the base pixel at the same
+    // index (which is the Euclidean-nearest base pixel for parallel translated
+    // Bresenham lines). Depth-0 pixels take the average of the two regions' heightmaps.
     public static class EdgeWingBuilder
     {
         public static List<EdgeWingPair> Build(
             RegionBuilder.Result result,
-            Dictionary<long, List<Vector2Int>> pairToCorners)
+            Dictionary<long, List<Vector2Int>> pairToCorners,
+            int maxDepth)
         {
+            if (maxDepth < 1) maxDepth = 1;
             var pairs = new List<EdgeWingPair>(pairToCorners.Count);
             foreach (var kv in pairToCorners)
             {
-                var p = BuildPair(result, kv.Key, kv.Value);
+                var p = BuildPair(result, kv.Key, kv.Value, maxDepth);
                 if (p != null) pairs.Add(p);
             }
             return pairs;
         }
 
-        private static EdgeWingPair BuildPair(RegionBuilder.Result result, long key, List<Vector2Int> corners)
+        private static EdgeWingPair BuildPair(RegionBuilder.Result result, long key,
+            List<Vector2Int> corners, int maxDepth)
         {
             int aId = (int)(key >> 32);
             int bId = (int)(key & 0xFFFFFFFFL);
@@ -45,15 +50,14 @@ namespace Terrain.Systems
             var perpStep = new Vector2Int(Mathf.RoundToInt(perp.x), Mathf.RoundToInt(perp.y));
             if (perpStep == Vector2Int.zero) return null;
 
-            // Three Bresenham edges. Same dx/dy → same pixel count for all three.
-            var baseLine  = LineRaster.Bresenham(c1, c2);
-            var sideALine = LineRaster.Bresenham(c1 + perpStep, c2 + perpStep);
-            var sideBLine = LineRaster.Bresenham(c1 - perpStep, c2 - perpStep);
+            // Base line + depth layers. Same dx/dy across all → same pixel count, so
+            // index correspondence is exact.
+            var baseLine = LineRaster.Bresenham(c1, c2);
 
             var regionA = result.Graph.Get(aId);
             var regionB = result.Graph.Get(bId);
 
-            int totalCap = baseLine.Count + sideALine.Count + sideBLine.Count;
+            int totalCap = baseLine.Count * (1 + 2 * maxDepth);
             var collection = new Dictionary<Vector2Int, WingPixel>(totalCap);
 
             // Step 1: base line. Height = average of the two regions' heightmaps.
@@ -65,11 +69,21 @@ namespace Terrain.Systems
                 collection[p] = new WingPixel { Height = h, Side = 0, Depth = 0 };
             }
 
-            // Step 2: side A (toward region A's perpendicular direction).
-            AddDepth1(sideALine, side: 1, baseLine, collection);
+            // Steps 2..N: side A and side B at each depth k.
+            var sideALayers = new List<List<Vector2Int>>(maxDepth);
+            var sideBLayers = new List<List<Vector2Int>>(maxDepth);
+            for (int depth = 1; depth <= maxDepth; depth++)
+            {
+                var shift = new Vector2Int(perpStep.x * depth, perpStep.y * depth);
+                var sideALine = LineRaster.Bresenham(c1 + shift, c2 + shift);
+                var sideBLine = LineRaster.Bresenham(c1 - shift, c2 - shift);
 
-            // Step 3: side B (opposite direction).
-            AddDepth1(sideBLine, side: 2, baseLine, collection);
+                AddDepthLayer(sideALine, side: 1, depth: (byte)depth, baseLine, collection);
+                AddDepthLayer(sideBLine, side: 2, depth: (byte)depth, baseLine, collection);
+
+                sideALayers.Add(sideALine);
+                sideBLayers.Add(sideBLine);
+            }
 
             return new EdgeWingPair
             {
@@ -80,44 +94,26 @@ namespace Terrain.Systems
                 PerpUnit = perp,
                 PerpStep = perpStep,
                 BaseLine = baseLine,
-                SideALine = sideALine,
-                SideBLine = sideBLine,
+                SideALayers = sideALayers,
+                SideBLayers = sideBLayers,
                 Collection = collection,
             };
         }
 
-        private static void AddDepth1(
-            List<Vector2Int> line, byte side,
+        private static void AddDepthLayer(
+            List<Vector2Int> line, byte side, byte depth,
             List<Vector2Int> baseLine,
             Dictionary<Vector2Int, WingPixel> collection)
         {
+            int baseN = baseLine.Count;
             for (int i = 0; i < line.Count; i++)
             {
                 var p = line[i];
                 if (collection.ContainsKey(p)) continue;
-                float h = NearestDepth0Height(p, baseLine, collection);
-                collection[p] = new WingPixel { Height = h, Side = side, Depth = 1 };
+                var basePixel = baseLine[Mathf.Min(i, baseN - 1)];
+                float h = collection[basePixel].Height;
+                collection[p] = new WingPixel { Height = h, Side = side, Depth = depth };
             }
-        }
-
-        private static float NearestDepth0Height(
-            Vector2Int p,
-            List<Vector2Int> baseLine,
-            Dictionary<Vector2Int, WingPixel> collection)
-        {
-            float bestDistSq = float.MaxValue;
-            float bestH = 0f;
-            for (int i = 0; i < baseLine.Count; i++)
-            {
-                var bp = baseLine[i];
-                int dx = p.x - bp.x, dy = p.y - bp.y;
-                float d = dx * dx + dy * dy;
-                if (d >= bestDistSq) continue;
-                if (!collection.TryGetValue(bp, out var entry) || entry.Depth != 0) continue;
-                bestDistSq = d;
-                bestH = entry.Height;
-            }
-            return bestH;
         }
 
         private static float SampleAvgHeight(Region a, Region b, Vector2Int p)

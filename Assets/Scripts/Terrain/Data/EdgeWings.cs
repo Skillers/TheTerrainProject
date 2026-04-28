@@ -12,10 +12,11 @@ namespace Terrain.Data
     }
 
     // One region pair's edge data: the corner-to-corner straight line rasterized via
-    // Bresenham (BaseLine, depth 0), plus two more Bresenham edges shifted one
-    // perpendicular unit into each region (SideALine and SideBLine, depth 1). The
-    // Collection holds one entry per UNIQUE pixel across all three lines — first
-    // write wins, so a depth-1 pixel that lands on a depth-0 pixel is skipped.
+    // Bresenham (BaseLine, depth 0), plus per-depth layers of Bresenham edges shifted
+    // k perpendicular units into each region (SideALayers[k-1], SideBLayers[k-1] for
+    // depth k = 1..MaxDepth). The Collection holds one entry per UNIQUE pixel across
+    // all lines — first write wins, so a deeper pixel that lands on an existing one
+    // is skipped.
     public class EdgeWingPair
     {
         public int RegionA;
@@ -27,9 +28,9 @@ namespace Terrain.Data
         public Vector2 PerpUnit;   // unit perpendicular to (CornerB - CornerA)
         public Vector2Int PerpStep; // PerpUnit snapped to integer step (RoundToInt)
 
-        public List<Vector2Int> BaseLine;   // Bresenham(CornerA, CornerB)
-        public List<Vector2Int> SideALine;  // Bresenham(CornerA + PerpStep, CornerB + PerpStep)
-        public List<Vector2Int> SideBLine;  // Bresenham(CornerA - PerpStep, CornerB - PerpStep)
+        public List<Vector2Int> BaseLine;            // Bresenham(CornerA, CornerB)
+        public List<List<Vector2Int>> SideALayers;   // [k-1] = Bresenham(CornerA + k*PerpStep, CornerB + k*PerpStep)
+        public List<List<Vector2Int>> SideBLayers;   // [k-1] = Bresenham(CornerA - k*PerpStep, CornerB - k*PerpStep)
 
         public Dictionary<Vector2Int, WingPixel> Collection;
     }

@@ -15,6 +15,9 @@ namespace Terrain.DebugViews
     {
         public bool regenerateOnStart = true;
 
+        [Header("Wings")]
+        [Min(1)] public int maxDepth = 2;
+
         [Header("Rendering")]
         public Material sharedMaterial;
         public float worldYOffset = 0.05f;
@@ -47,7 +50,7 @@ namespace Terrain.DebugViews
             var data = TerrainDataSource.Instance?.Data;
             if (data == null) return;
 
-            LastBuild = EdgeWingBuilder.Build(data.BuildResult, data.PairToCorners);
+            LastBuild = EdgeWingBuilder.Build(data.BuildResult, data.PairToCorners, maxDepth);
             RebuildMeshes();
 
             int totalPixels = 0;
@@ -78,14 +81,20 @@ namespace Terrain.DebugViews
 
         private Mesh BuildStripMesh(EdgeWingPair pair, float invPpu)
         {
-            // Three parallel rows; same Bresenham dx/dy means same length, but clamp
-            // index defensively in case of degenerate input.
-            var rows = new[] { pair.SideBLine, pair.BaseLine, pair.SideALine };
             int M = pair.BaseLine.Count;
             if (M < 2) return null;
 
-            var verts = new Vector3[3 * M];
-            for (int row = 0; row < 3; row++)
+            // Stack rows from deepest -side, through base, to deepest +side.
+            int aDepth = pair.SideALayers?.Count ?? 0;
+            int bDepth = pair.SideBLayers?.Count ?? 0;
+            int rowCount = aDepth + bDepth + 1;
+            var rows = new List<List<Vector2Int>>(rowCount);
+            for (int k = bDepth - 1; k >= 0; k--) rows.Add(pair.SideBLayers[k]);
+            rows.Add(pair.BaseLine);
+            for (int k = 0; k < aDepth; k++) rows.Add(pair.SideALayers[k]);
+
+            var verts = new Vector3[rowCount * M];
+            for (int row = 0; row < rowCount; row++)
             {
                 var line = rows[row];
                 int len = line.Count;
@@ -100,9 +109,9 @@ namespace Terrain.DebugViews
             // Wind CW from above so the strip's normal is +Y. With perp defined as
             // (-edgeDir.y, edgeDir.x) the naive winding lands at -Y (back-facing from
             // the camera looking down) — swap the 2nd/3rd index of each triangle.
-            var tris = new int[2 * (M - 1) * 6];
+            var tris = new int[(rowCount - 1) * (M - 1) * 6];
             int t = 0;
-            for (int row = 0; row < 2; row++)
+            for (int row = 0; row < rowCount - 1; row++)
             {
                 int rA = row * M, rB = (row + 1) * M;
                 for (int i = 0; i < M - 1; i++)
