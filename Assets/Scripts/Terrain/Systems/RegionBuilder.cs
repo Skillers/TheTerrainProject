@@ -10,18 +10,61 @@ namespace Terrain.Systems
 {
     public static class RegionBuilder
     {
+        // A pixel has 4 edge-neighbours and so borders at most 4 distinct regions —
+        // its own and up to 3 others. We store ownership as a symmetric 4-slot strip
+        // per pixel: every region touching the pixel goes into the same array, with
+        // no preferred order or "primary" designation. Equal owners.
+        public const int OwnerSlots = 4;
+
         public readonly struct Result
         {
             public readonly RegionGraph Graph;
-            public readonly int[] PixelOwners; // row-major, length Width*Height; -1 = unassigned
+
+            // Symmetric multi-ownership. AllOwners[4*i + 0..3] hold every region that
+            // touches pixel i (including its own Voronoi cell). Slots are filled left
+            // to right; unused slots are -1. No slot is special — interior pixels
+            // happen to have only slot 0 set, and edge pixels fill 2-4 slots, all
+            // equally valid owners. -1 in slot 0 means the pixel is unassigned.
+            public readonly int[] AllOwners; // length 4*Width*Height
+
+            // Convenience view for single-owner consumers (mesh assignment, bounds, etc.).
+            // PixelOwners[i] == AllOwners[4*i]; it's exactly slot 0, NOT a designated
+            // primary. For edge pixels every entry in AllOwners[4*i..4*i+3] is equally
+            // an owner — new code that does generation/blending should read AllOwners.
+            public readonly int[] PixelOwners; // length Width*Height; -1 = unassigned
+
             public readonly Vector2Int[] SeedPixels; // original jittered seed positions (pre-merge)
             public readonly int Width;
             public readonly int Height;
 
-            public Result(RegionGraph g, int[] owners, Vector2Int[] seeds, int w, int h)
+            public Result(RegionGraph g, int[] allOwners, int[] pixelOwners,
+                Vector2Int[] seeds, int w, int h)
             {
-                Graph = g; PixelOwners = owners; SeedPixels = seeds; Width = w; Height = h;
+                Graph = g; AllOwners = allOwners; PixelOwners = pixelOwners;
+                SeedPixels = seeds; Width = w; Height = h;
             }
+
+            // Total number of regions touching pixel index i. 0 if unassigned.
+            public int OwnerCount(int i)
+            {
+                int b = OwnerSlots * i, n = 0;
+                if (AllOwners[b]     >= 0) n++;
+                if (AllOwners[b + 1] >= 0) n++;
+                if (AllOwners[b + 2] >= 0) n++;
+                if (AllOwners[b + 3] >= 0) n++;
+                return n;
+            }
+
+            public bool PixelTouchesRegion(int i, int regionId)
+            {
+                int b = OwnerSlots * i;
+                return AllOwners[b]     == regionId
+                    || AllOwners[b + 1] == regionId
+                    || AllOwners[b + 2] == regionId
+                    || AllOwners[b + 3] == regionId;
+            }
+
+            public bool IsEdgePixel(int i) => AllOwners[OwnerSlots * i + 1] >= 0;
         }
 
         public static Result Build(WorldConfig config)
@@ -104,6 +147,40 @@ namespace Terrain.Systems
                 pixelOwners[i] = s >= 0 ? seedToRegion[s] : -1;
             }
 
+            // 4b. Multi-ownership pass. For each pixel, list every region touching it
+            // through a shared edge (4-conn) — its own Voronoi cell goes in slot 0, then
+            // any distinct neighbouring regions fill the next slots. All slots are equal
+            // owners; slot 0 is just where the own region happens to land, not a primary.
+            // Capped at 4 slots per pixel since a pixel has 4 edges (4 distinct regions max).
+            int[] allOwners = new int[OwnerSlots * W * H];
+            for (int i = 0; i < allOwners.Length; i++) allOwners[i] = -1;
+
+            for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+            {
+                int idx  = y * W + x;
+                int self = pixelOwners[idx];
+                if (self < 0) continue;
+
+                int slotBase = OwnerSlots * idx;
+                allOwners[slotBase] = self;
+                int slot = 1;
+
+                for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    // 4-conn: skip self (0,0) and diagonals (|dx|==|dy|==1).
+                    if ((dx == 0) == (dy == 0)) continue;
+                    int nx = x + dx, ny = y + dy;
+                    if ((uint)nx >= (uint)W || (uint)ny >= (uint)H) continue;
+                    int cand = pixelOwners[ny * W + nx];
+                    if (cand < 0 || cand == self) continue;
+                    bool dup = false;
+                    for (int k = 1; k < slot; k++) if (allOwners[slotBase + k] == cand) { dup = true; break; }
+                    if (!dup && slot < OwnerSlots) allOwners[slotBase + slot++] = cand;
+                }
+            }
+
             // 5. Compute axis-aligned bounds per region.
             var mins = new int2[numRegions];
             var maxs = new int2[numRegions];
@@ -162,7 +239,7 @@ namespace Terrain.Systems
             seeds.Dispose();
             owner.Dispose();
 
-            return new Result(graph, pixelOwners, seedPixels, W, H);
+            return new Result(graph, allOwners, pixelOwners, seedPixels, W, H);
         }
     }
 }
