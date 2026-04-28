@@ -205,6 +205,43 @@ namespace Terrain.Systems
             };
         }
 
+        // Per-pass Jacobi smoothing on the wing collection — each cell adds `strength`
+        // times the height diff to each 4-neighbour that's also in the collection. The
+        // shadow copy holds the pre-pass heights so neighbour reads aren't contaminated
+        // by cells we've already updated in this pass. Multiple passes compound.
+        public static void Smooth(List<EdgeWingPair> pairs, float strength, int passes)
+        {
+            if (pairs == null || passes <= 0 || strength <= 0f) return;
+            for (int pass = 0; pass < passes; pass++)
+                for (int i = 0; i < pairs.Count; i++)
+                    SmoothPair(pairs[i], strength);
+        }
+
+        private static void SmoothPair(EdgeWingPair pair, float strength)
+        {
+            var coll = pair.Collection;
+            if (coll == null || coll.Count == 0) return;
+
+            var shadow = new Dictionary<Vector2Int, float>(coll.Count);
+            foreach (var kv in coll) shadow[kv.Key] = kv.Value.Height;
+
+            var keys = new List<Vector2Int>(coll.Keys);
+            for (int i = 0; i < keys.Count; i++)
+            {
+                var p = keys[i];
+                float h = shadow[p];
+                float delta = 0f;
+                if (shadow.TryGetValue(new Vector2Int(p.x + 1, p.y    ), out var hr)) delta += (hr - h) * strength;
+                if (shadow.TryGetValue(new Vector2Int(p.x - 1, p.y    ), out var hl)) delta += (hl - h) * strength;
+                if (shadow.TryGetValue(new Vector2Int(p.x,     p.y + 1), out var hu)) delta += (hu - h) * strength;
+                if (shadow.TryGetValue(new Vector2Int(p.x,     p.y - 1), out var hd)) delta += (hd - h) * strength;
+
+                var entry = coll[p];
+                entry.Height = h + delta;
+                coll[p] = entry;
+            }
+        }
+
         // Walk one pixel at a time outward from `mid` along ±perpStep until we hit a
         // pixel owned by the pair, to figure out which actual region lives on each side.
         // If sampling fails, infer the missing side from the other; if both fail (rare,

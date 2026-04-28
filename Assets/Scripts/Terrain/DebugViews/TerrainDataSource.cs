@@ -24,6 +24,9 @@ namespace Terrain.DebugViews
         [Header("Wings")]
         [Tooltip("Half-width of each pair's perpendicular blend band, in pixels. Built BEFORE SeamHeightApplier so the avg-pixel reads see raw biome heights.")]
         [Min(1)] public int wingMaxDepth = 2;
+        [Tooltip("Per-pass Jacobi smoothing strength on the wing collection — 0.1 means each cell pulls 10% of the height diff from each 4-neighbour. Set to 0 to disable.")]
+        [Range(0f, 0.25f)] public float wingSmoothStrength = 0.1f;
+        [Min(0)] public int wingSmoothPasses = 1;
 
         public TerrainData Data { get; private set; }
 
@@ -61,6 +64,7 @@ namespace Terrain.DebugViews
             // otherwise the side-blend reads the locked avg instead of the side region's
             // raw FBM noise.
             var wingPairs = EdgeWingBuilder.Build(buildResult, pairToCorners, wingMaxDepth);
+            EdgeWingBuilder.Smooth(wingPairs, wingSmoothStrength, wingSmoothPasses);
 
             SeamHeightApplier.Apply(buildResult);
 
