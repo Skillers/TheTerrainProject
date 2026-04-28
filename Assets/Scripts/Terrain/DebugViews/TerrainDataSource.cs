@@ -21,6 +21,10 @@ namespace Terrain.DebugViews
         public bool regenerateOnStart = true;
         public bool advanceSeedEachRegenerate = false;
 
+        [Header("Wings")]
+        [Tooltip("Half-width of each pair's perpendicular blend band, in pixels. Built BEFORE SeamHeightApplier so the avg-pixel reads see raw biome heights.")]
+        [Min(1)] public int wingMaxDepth = 2;
+
         public TerrainData Data { get; private set; }
 
         private void Awake()
@@ -47,11 +51,19 @@ namespace Terrain.DebugViews
             var buildResult = RegionBuilder.Build(config);
             BiomeAssigner.Assign(buildResult.Graph, biomePool, config.seed);
             HeightmapBuilder.BuildAll(buildResult.Graph, config);
-            SeamHeightApplier.Apply(buildResult);
 
             List<Vector2Int> interiorCorners;
             Dictionary<long, List<Vector2Int>> pairToCorners;
             DetectCorners(buildResult, out pairToCorners, out interiorCorners);
+
+            // Wings sample the heightmaps for their avg-pixel snapshot. They MUST run
+            // before SeamHeightApplier overwrites multi-owner pixels with the seam avg —
+            // otherwise the side-blend reads the locked avg instead of the side region's
+            // raw FBM noise.
+            var wingPairs = EdgeWingBuilder.Build(buildResult, pairToCorners, wingMaxDepth);
+
+            SeamHeightApplier.Apply(buildResult);
+
             var seamEndpoints   = ExtractSeamEndpoints(buildResult, pairToCorners);
             var pairToSupercov  = BuildSupercoverPixels(pairToCorners);
             var pairToWalls     = BuildBoundaryWalls(buildResult);
@@ -64,9 +76,10 @@ namespace Terrain.DebugViews
                 SeamEndpoints          = seamEndpoints,
                 PairToSupercoverPixels = pairToSupercov,
                 PairToBoundaryWalls    = pairToWalls,
+                WingPairs              = wingPairs,
             };
 
-            Debug.Log($"[TerrainDataSource] seed={config.seed}  regions={buildResult.Graph.Count}  seams={seamEndpoints.Count}  pixels={buildResult.Width}x{buildResult.Height}", this);
+            Debug.Log($"[TerrainDataSource] seed={config.seed}  regions={buildResult.Graph.Count}  seams={seamEndpoints.Count}  wings={wingPairs.Count}  pixels={buildResult.Width}x{buildResult.Height}", this);
         }
 
         // ── Corner / edge detection ────────────────────────────────────────────────

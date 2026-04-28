@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using Terrain.Data;
 using Terrain.Systems;
 using UnityEngine;
 
@@ -35,5 +36,10 @@ namespace Terrain.DebugViews
         // Real jagged seam: each entry is a unit-length wall segment in grid-corner coords
         // where two 4-adjacent pixels belong to different regions of the pair.
         public Dictionary<long, List<SeamLine>> PairToBoundaryWalls;
+
+        // Per-pair perpendicular blend bands. Built BEFORE SeamHeightApplier modifies the
+        // heightmaps so each cell's avg-pixel sample is the raw biome FBM output, not the
+        // already-locked seam value.
+        public List<EdgeWingPair> WingPairs;
     }
 }

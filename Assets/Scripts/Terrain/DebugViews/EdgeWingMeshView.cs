@@ -1,29 +1,23 @@
 using System.Collections.Generic;
 using Terrain.Data;
-using Terrain.Systems;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 namespace Terrain.DebugViews
 {
-    // Builds one strip mesh per region pair from the three Bresenham edges produced
-    // by EdgeWingBuilder. The strip stacks rows as [SideB, Base, SideA] and triangulates
-    // between consecutive rows. Heights come from the per-pair Collection — pixels
-    // skipped during dedup (a depth-1 pixel that landed on the base) reuse the base
-    // entry's height naturally because the dictionary lookup falls through to it.
+    // Builds one mesh per region pair on the same integer corner grid the heightmap
+    // mesh uses. For each integer cell (wx, wy) inside the wing's bounding box, emits
+    // an axis-aligned quad iff all four corners (wx, wy), (wx+1, wy), (wx, wy+1),
+    // (wx+1, wy+1) live in the pair's Collection. Each quad gets 6 unshared vertices
+    // so RecalculateNormals produces flat per-cell shading — same as HeightmapDebugView.
     public class EdgeWingMeshView : MonoBehaviour
     {
         public bool regenerateOnStart = true;
-
-        [Header("Wings")]
-        [Min(1)] public int maxDepth = 2;
 
         [Header("Rendering")]
         public Material sharedMaterial;
         public float worldYOffset = 0.05f;
         public Color tint = new Color(0.85f, 0.35f, 0.95f, 1f);
-
-        public List<EdgeWingPair> LastBuild { get; private set; }
 
         private Transform _meshesRoot;
         private Material _fallbackMat;
@@ -48,28 +42,18 @@ namespace Terrain.DebugViews
         public void Rebuild()
         {
             var data = TerrainDataSource.Instance?.Data;
-            if (data == null) return;
-
-            LastBuild = EdgeWingBuilder.Build(data.BuildResult, data.PairToCorners, maxDepth);
-            RebuildMeshes();
-
-            int totalPixels = 0;
-            for (int i = 0; i < LastBuild.Count; i++) totalPixels += LastBuild[i].Collection.Count;
-            Debug.Log($"[EdgeWingMeshView] pairs={LastBuild.Count}  uniquePixels={totalPixels}", this);
-        }
-
-        private void RebuildMeshes()
-        {
-            if (TerrainDataSource.Instance?.Data == null || LastBuild == null) return;
+            if (data?.WingPairs == null) return;
             float invPpu = 1f / TerrainDataSource.Instance.config.pixelsPerUnit;
 
             EnsureMeshesRoot();
             ClearMeshes();
 
-            for (int t = 0; t < LastBuild.Count; t++)
+            int totalPixels = 0;
+            for (int t = 0; t < data.WingPairs.Count; t++)
             {
-                var pair = LastBuild[t];
-                var mesh = BuildStripMesh(pair, invPpu);
+                var pair = data.WingPairs[t];
+                totalPixels += pair.Collection?.Count ?? 0;
+                var mesh = BuildGridQuadMesh(pair, invPpu);
                 if (mesh == null) continue;
 
                 var go = new GameObject($"EdgeWing_{pair.RegionA}_{pair.RegionB}");
@@ -77,56 +61,58 @@ namespace Terrain.DebugViews
                 go.AddComponent<MeshFilter>().sharedMesh = mesh;
                 go.AddComponent<MeshRenderer>().sharedMaterial = ResolveMaterial();
             }
+            Debug.Log($"[EdgeWingMeshView] pairs={data.WingPairs.Count}  uniquePixels={totalPixels}", this);
         }
 
-        private Mesh BuildStripMesh(EdgeWingPair pair, float invPpu)
+        private Mesh BuildGridQuadMesh(EdgeWingPair pair, float invPpu)
         {
-            int M = pair.BaseLine.Count;
-            if (M < 2) return null;
+            var coll = pair.Collection;
+            if (coll == null || coll.Count == 0) return null;
 
-            // Stack rows from deepest -side, through base, to deepest +side.
-            int aDepth = pair.SideALayers?.Count ?? 0;
-            int bDepth = pair.SideBLayers?.Count ?? 0;
-            int rowCount = aDepth + bDepth + 1;
-            var rows = new List<List<Vector2Int>>(rowCount);
-            for (int k = bDepth - 1; k >= 0; k--) rows.Add(pair.SideBLayers[k]);
-            rows.Add(pair.BaseLine);
-            for (int k = 0; k < aDepth; k++) rows.Add(pair.SideALayers[k]);
-
-            var verts = new Vector3[rowCount * M];
-            for (int row = 0; row < rowCount; row++)
+            int xMin = int.MaxValue, yMin = int.MaxValue;
+            int xMax = int.MinValue, yMax = int.MinValue;
+            foreach (var p in coll.Keys)
             {
-                var line = rows[row];
-                int len = line.Count;
-                for (int i = 0; i < M; i++)
-                {
-                    var p = line[Mathf.Min(i, len - 1)];
-                    float h = pair.Collection.TryGetValue(p, out var entry) ? entry.Height : 0f;
-                    verts[row * M + i] = new Vector3(p.x * invPpu, h + worldYOffset, p.y * invPpu);
-                }
+                if (p.x < xMin) xMin = p.x;
+                if (p.y < yMin) yMin = p.y;
+                if (p.x > xMax) xMax = p.x;
+                if (p.y > yMax) yMax = p.y;
+            }
+            if (xMax <= xMin || yMax <= yMin) return null;
+
+            var verts = new List<Vector3>();
+            var tris  = new List<int>();
+
+            for (int wy = yMin; wy < yMax; wy++)
+            for (int wx = xMin; wx < xMax; wx++)
+            {
+                var c00 = new Vector2Int(wx,     wy    );
+                var c10 = new Vector2Int(wx + 1, wy    );
+                var c01 = new Vector2Int(wx,     wy + 1);
+                var c11 = new Vector2Int(wx + 1, wy + 1);
+                if (!coll.TryGetValue(c00, out var w00)) continue;
+                if (!coll.TryGetValue(c10, out var w10)) continue;
+                if (!coll.TryGetValue(c01, out var w01)) continue;
+                if (!coll.TryGetValue(c11, out var w11)) continue;
+
+                var v00 = new Vector3( wx      * invPpu, w00.Height + worldYOffset,  wy      * invPpu);
+                var v10 = new Vector3((wx + 1) * invPpu, w10.Height + worldYOffset,  wy      * invPpu);
+                var v01 = new Vector3( wx      * invPpu, w01.Height + worldYOffset, (wy + 1) * invPpu);
+                var v11 = new Vector3((wx + 1) * invPpu, w11.Height + worldYOffset, (wy + 1) * invPpu);
+
+                int b = verts.Count;
+                verts.Add(v00); tris.Add(b);
+                verts.Add(v01); tris.Add(b + 1);
+                verts.Add(v10); tris.Add(b + 2);
+                verts.Add(v10); tris.Add(b + 3);
+                verts.Add(v01); tris.Add(b + 4);
+                verts.Add(v11); tris.Add(b + 5);
             }
 
-            // Wind CW from above so the strip's normal is +Y. With perp defined as
-            // (-edgeDir.y, edgeDir.x) the naive winding lands at -Y (back-facing from
-            // the camera looking down) — swap the 2nd/3rd index of each triangle.
-            var tris = new int[(rowCount - 1) * (M - 1) * 6];
-            int t = 0;
-            for (int row = 0; row < rowCount - 1; row++)
-            {
-                int rA = row * M, rB = (row + 1) * M;
-                for (int i = 0; i < M - 1; i++)
-                {
-                    tris[t++] = rA + i;
-                    tris[t++] = rB + i;
-                    tris[t++] = rA + i + 1;
-                    tris[t++] = rB + i;
-                    tris[t++] = rB + i + 1;
-                    tris[t++] = rA + i + 1;
-                }
-            }
+            if (tris.Count == 0) return null;
 
             var mesh = new Mesh { hideFlags = HideFlags.DontSave };
-            mesh.indexFormat = verts.Length > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
+            mesh.indexFormat = verts.Count > 65535 ? IndexFormat.UInt32 : IndexFormat.UInt16;
             mesh.SetVertices(verts);
             mesh.SetTriangles(tris, 0);
             mesh.RecalculateNormals();
