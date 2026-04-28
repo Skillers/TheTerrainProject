@@ -31,6 +31,30 @@ namespace Terrain.Algorithms
             return result;
         }
 
+        // Classic Bresenham line rasterization — one pixel per step in the major axis.
+        // Diagonal cells are NOT included (unlike Supercover). Pixel count is always
+        // max(|dx|, |dy|) + 1, so two parallel lines (translated by a constant) produce
+        // the same number of pixels.
+        public static List<Vector2Int> Bresenham(Vector2Int p0, Vector2Int p1)
+        {
+            var result = new List<Vector2Int>();
+            int x0 = p0.x, y0 = p0.y;
+            int x1 = p1.x, y1 = p1.y;
+            int dx = Mathf.Abs(x1 - x0), dy = Mathf.Abs(y1 - y0);
+            int sx = x0 < x1 ? 1 : -1;
+            int sy = y0 < y1 ? 1 : -1;
+            int err = dx - dy;
+            while (true)
+            {
+                result.Add(new Vector2Int(x0, y0));
+                if (x0 == x1 && y0 == y1) break;
+                int e2 = err * 2;
+                if (e2 > -dy) { err -= dy; x0 += sx; }
+                if (e2 <  dx) { err += dx; y0 += sy; }
+            }
+            return result;
+        }
+
         public static Vector2Int FindFurthest(List<Vector2Int> pts, Vector2Int from)
         {
             Vector2Int best = pts[0];
