@@ -15,6 +15,12 @@ namespace Terrain.Biomes
         public float heightAmplitude = 5f;
         public AnimationCurve heightCurve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
 
+        [Header("Edge transition")]
+        // Remaps depth/maxDepth (0 at the seam → 1 at the deepest wing) to a blend
+        // weight between the seam height and this biome's heightmap. Default linear =
+        // proportional ramp; tweak to make this side ease in slow, snap fast, etc.
+        public AnimationCurve edgeTransitionCurve = AnimationCurve.Linear(0f, 0f, 1f, 1f);
+
         [Header("Noise")]
         [Min(0.0001f)] public float noiseScale = 0.05f;
         [Range(1, 8)]  public int   octaves = 4;

@@ -117,7 +117,11 @@ namespace Terrain.Systems
             Dictionary<Vector2Int, WingPixel> collection)
         {
             int baseN = baseLine.Count;
-            float t = (float)depth / maxDepth; // 0 → all base, 1 → all region
+            float t = (float)depth / maxDepth; // 0 → seam, 1 → fully in region
+            // Each side eases via its own biome curve. Falls back to linear if the
+            // biome (or its curve) isn't assigned.
+            var curve = region?.Biome?.edgeTransitionCurve;
+            float w = curve != null ? curve.Evaluate(t) : t;
             for (int i = 0; i < line.Count; i++)
             {
                 var p = line[i];
@@ -125,7 +129,7 @@ namespace Terrain.Systems
                 var basePixel = baseLine[Mathf.Min(i, baseN - 1)];
                 float baseHeight = collection[basePixel].Height;
                 float regionHeight = SampleHeight(region, p);
-                float blended = baseHeight * (1f - t) + regionHeight * t;
+                float blended = baseHeight * (1f - w) + regionHeight * w;
                 collection[p] = new WingPixel { Height = blended, Side = side, Depth = depth };
             }
         }
