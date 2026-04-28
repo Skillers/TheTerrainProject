@@ -27,5 +27,13 @@ namespace Terrain.DebugViews
         // Supercover endpoints for every different-biome region pair.
         // Used by HeightmapDebugView to build its Y=0 seam mesh.
         public List<SeamLine> SeamEndpoints;
+
+        // Pixel chain produced by Bresenham/supercover between the two extreme corner
+        // points of each pair. Straight-line approximation of the seam.
+        public Dictionary<long, List<Vector2Int>> PairToSupercoverPixels;
+
+        // Real jagged seam: each entry is a unit-length wall segment in grid-corner coords
+        // where two 4-adjacent pixels belong to different regions of the pair.
+        public Dictionary<long, List<SeamLine>> PairToBoundaryWalls;
     }
 }
