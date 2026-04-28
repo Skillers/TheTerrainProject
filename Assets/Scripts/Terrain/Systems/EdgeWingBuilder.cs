@@ -38,6 +38,14 @@ namespace Terrain.Systems
             int aId = (int)(key >> 32);
             int bId = (int)(key & 0xFFFFFFFFL);
 
+            // Same-biome pairs already share continuous noise across the seam (same world
+            // coords, same biome offset → identical heightmap values). No blending needed,
+            // so skip wing construction entirely. Matches the filter in ExtractSeamEndpoints.
+            var regionA = result.Graph.Get(aId);
+            var regionB = result.Graph.Get(bId);
+            if (regionA?.Biome != null && regionB?.Biome != null
+                && regionA.Biome.type == regionB.Biome.type) return null;
+
             if (corners.Count < 2) return null;
             var c1 = LineRaster.FindFurthest(corners, corners[0]);
             var c2 = LineRaster.FindFurthest(corners, c1);
@@ -53,9 +61,6 @@ namespace Terrain.Systems
             // Base line + depth layers. Same dx/dy across all → same pixel count, so
             // index correspondence is exact.
             var baseLine = LineRaster.Bresenham(c1, c2);
-
-            var regionA = result.Graph.Get(aId);
-            var regionB = result.Graph.Get(bId);
 
             // Determine which actual region sits on each perpendicular side. The blend
             // at depth k pulls toward the heightmap of THAT side's region — not "region

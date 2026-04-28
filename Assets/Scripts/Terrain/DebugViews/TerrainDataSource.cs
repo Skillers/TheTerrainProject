@@ -47,6 +47,7 @@ namespace Terrain.DebugViews
             var buildResult = RegionBuilder.Build(config);
             BiomeAssigner.Assign(buildResult.Graph, biomePool, config.seed);
             HeightmapBuilder.BuildAll(buildResult.Graph, config);
+            SeamHeightApplier.Apply(buildResult);
 
             List<Vector2Int> interiorCorners;
             Dictionary<long, List<Vector2Int>> pairToCorners;
