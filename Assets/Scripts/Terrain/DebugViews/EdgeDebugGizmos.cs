@@ -34,7 +34,7 @@ namespace Terrain.DebugViews
         {
             if (!show) return;
 
-            var src = TerrainDataSource.Instance;
+            var src = TerrainGen.Instance;
             if (src?.config == null || src.Data == null) return;
             var data   = src.Data;
             var result = data.BuildResult;

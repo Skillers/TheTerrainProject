@@ -12,6 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: f9db6647b80c36a4bbf524630c2305f5, type: 3}
   m_Name: WorldConfig
   m_EditorClassIdentifier: Terrain.Core::Terrain.Core.WorldConfig
+  seedString: 
   seed: 0
   worldSizeInBiomes: {x: 4, y: 4}
   biomeSize: 32

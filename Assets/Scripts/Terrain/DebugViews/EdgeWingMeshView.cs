@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Terrain.Data;
+using Terrain.Systems;
 using UnityEngine;
 using UnityEngine.Rendering;
 
@@ -12,8 +13,6 @@ namespace Terrain.DebugViews
     // so RecalculateNormals produces flat per-cell shading — same as HeightmapDebugView.
     public class EdgeWingMeshView : MonoBehaviour
     {
-        public bool regenerateOnStart = true;
-
         [Header("Rendering")]
         public Material sharedMaterial;
         public float worldYOffset = 0.05f;
@@ -24,26 +23,33 @@ namespace Terrain.DebugViews
 
         private void Start()
         {
-            if (regenerateOnStart && TerrainDataSource.Instance != null) Regenerate();
+            if (TerrainGen.Instance == null) return;
+            TerrainGen.Instance.OnRegenerated += Rebuild;
+            if (TerrainGen.Instance.Data != null) Rebuild();
+        }
+
+        private void OnDestroy()
+        {
+            if (TerrainGen.Instance != null)
+                TerrainGen.Instance.OnRegenerated -= Rebuild;
         }
 
         [ContextMenu("Regenerate")]
         public void Regenerate()
         {
-            if (TerrainDataSource.Instance == null)
+            if (TerrainGen.Instance == null)
             {
-                Debug.LogError("[EdgeWingMeshView] No TerrainDataSource found in scene.", this);
+                Debug.LogError("[EdgeWingMeshView] No TerrainGen found in scene.", this);
                 return;
             }
-            TerrainDataSource.Instance.Regenerate();
-            Rebuild();
+            TerrainGen.Instance.Regenerate();
         }
 
         public void Rebuild()
         {
-            var data = TerrainDataSource.Instance?.Data;
+            var data = TerrainGen.Instance?.Data;
             if (data?.WingPairs == null) return;
-            float invPpu = 1f / TerrainDataSource.Instance.config.pixelsPerUnit;
+            float invPpu = 1f / TerrainGen.Instance.config.pixelsPerUnit;
 
             EnsureMeshesRoot();
             ClearMeshes();

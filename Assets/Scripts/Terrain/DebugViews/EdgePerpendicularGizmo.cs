@@ -46,7 +46,7 @@ namespace Terrain.DebugViews
             CachedEntries.Clear();
             if (!show) return;
 
-            var src = TerrainDataSource.Instance;
+            var src = TerrainGen.Instance;
             if (src == null || src.config == null || src.Data == null) return;
             var data = src.Data;
             if (data.PairToCorners == null) return;
@@ -69,8 +69,8 @@ namespace Terrain.DebugViews
 
                 var pts = kv.Value;
                 if (pts.Count < 2) continue;
-                var p1 = TerrainDataSource.FindFurthest(pts, pts[0]);
-                var p2 = TerrainDataSource.FindFurthest(pts, p1);
+                var p1 = TerrainGen.FindFurthest(pts, pts[0]);
+                var p2 = TerrainGen.FindFurthest(pts, p1);
                 if (p1 == p2) continue;
 
                 Vector2 dir = new Vector2(p2.x - p1.x, p2.y - p1.y);

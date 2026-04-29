@@ -4338,6 +4338,9 @@ MonoBehaviour:
   - {fileID: 11400000, guid: fa02865b211ba43478e2988acf0894af, type: 2}
   regenerateOnStart: 1
   advanceSeedEachRegenerate: 0
+  wingMaxDepth: 10
+  wingSmoothStrength: 0.1
+  wingSmoothPasses: 1
 --- !u!4 &849325815
 Transform:
   m_ObjectHideFlags: 0
@@ -9044,7 +9047,6 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Terrain.DebugViews::Terrain.DebugViews.EdgeWingMeshView
   regenerateOnStart: 1
-  maxDepth: 2
   sharedMaterial: {fileID: 0}
   worldYOffset: 0.05
   tint: {r: 0.85, g: 0.35, b: 0.95, a: 1}

@@ -10,38 +10,45 @@ namespace Terrain.DebugViews
     // giving a hard cliff at every region boundary. Edge debug visualisation lives in EdgeDebugGizmos.
     public class HeightmapDebugView : MonoBehaviour
     {
-        public bool regenerateOnStart = true;
-
         [Header("Rendering")]
         public Material sharedMaterial;
 
         private Transform _meshesRoot;
         private Material _fallbackMat;
 
+        // Subscribe in Start (after all Awakes have run, so TerrainGen.Instance is set).
+        // If TerrainGen.Start already fired Regenerate before this Start runs, Data
+        // exists — call Rebuild now so we don't sit blank waiting for a future event.
         private void Start()
         {
-            if (TerrainDataSource.Instance != null && TerrainDataSource.Instance.regenerateOnStart)
-                Regenerate();
+            if (TerrainGen.Instance == null) return;
+            TerrainGen.Instance.OnRegenerated += Rebuild;
+            if (TerrainGen.Instance.Data != null) Rebuild();
+        }
+
+        private void OnDestroy()
+        {
+            if (TerrainGen.Instance != null)
+                TerrainGen.Instance.OnRegenerated -= Rebuild;
         }
 
         [ContextMenu("Regenerate")]
         public void Regenerate()
         {
-            if (TerrainDataSource.Instance == null)
+            if (TerrainGen.Instance == null)
             {
-                Debug.LogError("[HeightmapDebugView] No TerrainDataSource found in scene.", this);
+                Debug.LogError("[HeightmapDebugView] No TerrainGen found in scene.", this);
                 return;
             }
-            TerrainDataSource.Instance.Regenerate();
-            Rebuild();
+            TerrainGen.Instance.Regenerate();
         }
 
         public void Rebuild()
         {
-            if (TerrainDataSource.Instance?.Data == null) return;
-            var data     = TerrainDataSource.Instance.Data;
+            if (TerrainGen.Instance?.Data == null) return;
+            var data     = TerrainGen.Instance.Data;
             var result   = data.BuildResult;
-            float invPpu = 1f / TerrainDataSource.Instance.config.pixelsPerUnit;
+            float invPpu = 1f / TerrainGen.Instance.config.pixelsPerUnit;
             int W = result.Width, H = result.Height;
 
             // ── Region terrain meshes ─────────────────────────────────────────────
@@ -116,7 +123,7 @@ namespace Terrain.DebugViews
                 go.AddComponent<MeshRenderer>().sharedMaterial = ResolveMaterial(region.Biome.debugColor);
             }
 
-            Debug.Log($"[HeightmapDebugView] seed={TerrainDataSource.Instance.config.seed}  regions={regionQuads.Count}  pixels={W}x{H}", this);
+            Debug.Log($"[HeightmapDebugView] seed={TerrainGen.Instance.config.seed}  regions={regionQuads.Count}  pixels={W}x{H}", this);
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────

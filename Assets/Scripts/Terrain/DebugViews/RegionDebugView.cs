@@ -50,27 +50,34 @@ namespace Terrain.DebugViews
 
         private void Start()
         {
-            if (TerrainDataSource.Instance != null && TerrainDataSource.Instance.regenerateOnStart) Regenerate();
+            if (TerrainGen.Instance == null) return;
+            TerrainGen.Instance.OnRegenerated += Rebuild;
+            if (TerrainGen.Instance.Data != null) Rebuild();
+        }
+
+        private void OnDestroy()
+        {
+            if (TerrainGen.Instance != null)
+                TerrainGen.Instance.OnRegenerated -= Rebuild;
         }
 
         [ContextMenu("Regenerate")]
         public void Regenerate()
         {
-            if (TerrainDataSource.Instance == null)
+            if (TerrainGen.Instance == null)
             {
-                Debug.LogError("[RegionDebugView] No TerrainDataSource found in scene.", this);
+                Debug.LogError("[RegionDebugView] No TerrainGen found in scene.", this);
                 return;
             }
 
-            TerrainDataSource.Instance.Regenerate();
-            Rebuild();
+            TerrainGen.Instance.Regenerate();
         }
 
-        // Rebuilds visuals from the current TerrainDataSource.Instance.Data without re-running the pipeline.
+        // Rebuilds visuals from the current TerrainGen.Instance.Data without re-running the pipeline.
         public void Rebuild()
         {
-            if (TerrainDataSource.Instance?.Data == null) return;
-            var data = TerrainDataSource.Instance.Data;
+            if (TerrainGen.Instance?.Data == null) return;
+            var data = TerrainGen.Instance.Data;
             var result = data.BuildResult;
 
             var regionColor = new Color32[result.Graph.Count];
@@ -108,8 +115,8 @@ namespace Terrain.DebugViews
             UpdateEdgeMeshes(result, data.PairToCorners);
             UpdateCornerDots(result, data.InteriorCorners);
 
-            int poolSize = TerrainDataSource.Instance.biomePool != null ? TerrainDataSource.Instance.biomePool.Length : 0;
-            Debug.Log($"[RegionDebugView] seed={TerrainDataSource.Instance.config.seed}  regions={result.Graph.Count}  biomes={poolSize}  mode={colorMode}  pixels={result.Width}x{result.Height}", this);
+            int poolSize = TerrainGen.Instance.biomePool != null ? TerrainGen.Instance.biomePool.Length : 0;
+            Debug.Log($"[RegionDebugView] seed={TerrainGen.Instance.config.seed}  regions={result.Graph.Count}  biomes={poolSize}  mode={colorMode}  pixels={result.Width}x{result.Height}", this);
         }
 
         private void UpdateSeedDots(RegionBuilder.Result result)
@@ -190,11 +197,11 @@ namespace Terrain.DebugViews
                 var endpoints = kv.Value;
                 if (endpoints.Count < 2) continue;
 
-                var p1 = TerrainDataSource.FindFurthest(endpoints, endpoints[0]);
-                var p2 = TerrainDataSource.FindFurthest(endpoints, p1);
+                var p1 = TerrainGen.FindFurthest(endpoints, endpoints[0]);
+                var p2 = TerrainGen.FindFurthest(endpoints, p1);
                 if (p1 == p2) continue;
 
-                var line = TerrainDataSource.Supercover(p1, p2);
+                var line = TerrainGen.Supercover(p1, p2);
                 if (line.Count < 2) continue;
 
                 float halfW = edgeWidthPx * 0.5f;

@@ -1,9 +1,8 @@
 using System.Collections.Generic;
 using Terrain.Data;
-using Terrain.Systems;
 using UnityEngine;
 
-namespace Terrain.DebugViews
+namespace Terrain.Systems
 {
     public struct SeamLine
     {

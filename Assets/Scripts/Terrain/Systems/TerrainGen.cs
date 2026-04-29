@@ -1,20 +1,25 @@
+using System;
 using System.Collections.Generic;
 using Terrain.Algorithms;
 using Terrain.Biomes;
 using Terrain.Core;
 using Terrain.Data;
-using Terrain.Systems;
 using UnityEngine;
 
-namespace Terrain.DebugViews
+namespace Terrain.Systems
 {
-    // Single source of truth for all debug views.
-    // Runs the full pipeline (RegionBuilder → BiomeAssigner → HeightmapBuilder → edge detection)
-    // and stores the result in Data. Both RegionDebugView and HeightmapDebugView reference this
-    // component and call Regenerate() to refresh everything.
-    public class TerrainDataSource : MonoBehaviour
+    // Pipeline owner. Runs the full terrain build sequentially in one synchronous pass —
+    //   RegionBuilder → BiomeAssigner → HeightmapBuilder → DetectCorners
+    //                 → EdgeWingBuilder.Build → Smooth
+    //                 → SeamHeightApplier → EdgeWingApplier
+    //                 → seam endpoints / supercover / boundary walls
+    // and stores the result in Data, then fires OnRegenerated. Views subscribe to that
+    // event and rebuild their visuals from the published Data — they never trigger the
+    // pipeline themselves, so each Regenerate runs exactly once and every view sees the
+    // same fully-finished state.
+    public class TerrainGen : MonoBehaviour
     {
-        public static TerrainDataSource Instance { get; private set; }
+        public static TerrainGen Instance { get; private set; }
 
         public WorldConfig config;
         public BiomeProfile[] biomePool;
@@ -27,8 +32,15 @@ namespace Terrain.DebugViews
         [Tooltip("Per-pass Jacobi smoothing strength on the wing collection — 0.1 means each cell pulls 10% of the height diff from each 4-neighbour. Set to 0 to disable.")]
         [Range(0f, 0.25f)] public float wingSmoothStrength = 0.1f;
         [Min(0)] public int wingSmoothPasses = 1;
+        [Tooltip("Stamp wing heights into the region heightmaps after the wings are built — terrain mesh picks them up directly.")]
+        public bool applyWingsToHeightmap = true;
 
         public TerrainData Data { get; private set; }
+
+        // Fired AFTER Data is fully populated. Views subscribe in OnEnable and rebuild
+        // their meshes/gizmos from Data when this fires. The pipeline is finished by the
+        // time any subscriber runs.
+        public event Action OnRegenerated;
 
         private void Awake()
         {
@@ -45,7 +57,7 @@ namespace Terrain.DebugViews
         {
             if (config == null)
             {
-                Debug.LogError("[TerrainDataSource] Assign a WorldConfig asset.", this);
+                Debug.LogError("[TerrainGen] Assign a WorldConfig asset.", this);
                 return;
             }
             config.ResolveSeed();
@@ -68,6 +80,12 @@ namespace Terrain.DebugViews
 
             SeamHeightApplier.Apply(buildResult);
 
+            // Now stamp the (possibly-smoothed) wing heights into the regions' heightmaps,
+            // overwriting whatever was there — no blending. The terrain mesh will pick
+            // these up directly on its next sample.
+            if (applyWingsToHeightmap)
+                EdgeWingApplier.Apply(wingPairs, buildResult);
+
             var seamEndpoints   = ExtractSeamEndpoints(buildResult, pairToCorners);
             var pairToSupercov  = BuildSupercoverPixels(pairToCorners);
             var pairToWalls     = BuildBoundaryWalls(buildResult);
@@ -83,7 +101,9 @@ namespace Terrain.DebugViews
                 WingPairs              = wingPairs,
             };
 
-            Debug.Log($"[TerrainDataSource] seed={config.seed}  regions={buildResult.Graph.Count}  seams={seamEndpoints.Count}  wings={wingPairs.Count}  pixels={buildResult.Width}x{buildResult.Height}", this);
+            Debug.Log($"[TerrainGen] seed={config.seed}  regions={buildResult.Graph.Count}  seams={seamEndpoints.Count}  wings={wingPairs.Count}  pixels={buildResult.Width}x{buildResult.Height}", this);
+
+            OnRegenerated?.Invoke();
         }
 
         // ── Corner / edge detection ────────────────────────────────────────────────
@@ -154,9 +174,6 @@ namespace Terrain.DebugViews
             }
         }
 
-        // Per pair, walk the supercover (Bresenham-like) line between the two extreme corner
-        // points. Mirrors what HeightmapDebugView previously did inline; now precomputed so
-        // multiple debug views can share it.
         private static Dictionary<long, List<Vector2Int>> BuildSupercoverPixels(
             Dictionary<long, List<Vector2Int>> pairToCorners)
         {
@@ -173,14 +190,12 @@ namespace Terrain.DebugViews
             return dict;
         }
 
-        // Per pair, collect unit-length wall segments (in corner coords) along the same
-        // boundaries you actually SEE in HeightmapDebugView. The terrain mesh colours each
-        // quad (qx, qy) by the dominant region of its 4 corner pixels, so the visible seam
-        // sits between adjacent quads whose dominants differ — NOT between adjacent pixels.
-        // Compute dominants once into a (W-1) x (H-1) grid, then add a wall wherever two
-        // 4-neighbour quads disagree.
-        //   East quad-flip at (qx, qy):  segment ((qx+1, qy)   → (qx+1, qy+1))
-        //   North quad-flip at (qx, qy): segment ((qx,   qy+1) → (qx+1, qy+1))
+        // Per pair, collect unit-length wall segments in corner coords along the same
+        // boundaries seen in HeightmapDebugView. The terrain mesh colours each quad
+        // (qx, qy) by the dominant region of its 4 corner pixels, so the visible seam
+        // sits between adjacent quads whose dominants differ — NOT between adjacent
+        // pixels. Compute dominants once into a (W-1) x (H-1) grid, then add a wall
+        // wherever two 4-neighbour quads disagree.
         private static Dictionary<long, List<SeamLine>> BuildBoundaryWalls(RegionBuilder.Result result)
         {
             int W = result.Width, H = result.Height;
@@ -223,8 +238,6 @@ namespace Terrain.DebugViews
             return dict;
         }
 
-        // Same tie-breaking as HeightmapDebugView.DominantRegion so walls land exactly on the
-        // rendered colour seam.
         private static int QuadDominant(int r00, int r10, int r01, int r11)
         {
             int best = -1, bestCount = 0;
@@ -283,7 +296,7 @@ namespace Terrain.DebugViews
             list.Add(pos);
         }
 
-        // ── Shared algorithms (public so RegionDebugView can call them) ───────────
+        // ── Shared algorithms (public so debug views can call them) ───────────────
 
         public static bool AllSameBiome(RegionGraph graph, List<int> regs)
         {
