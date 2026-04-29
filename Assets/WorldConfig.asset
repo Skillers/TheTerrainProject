@@ -19,6 +19,7 @@ MonoBehaviour:
   pixelsPerUnit: 2
   biomeSeedFillRate: 0.9
   seedMergeDistance: 0
+  cornerMergeDistance: 3
   worldBaseScale: 0.005
   worldBaseAmplitude: 2
   heightmapPaddingFraction: 0.3

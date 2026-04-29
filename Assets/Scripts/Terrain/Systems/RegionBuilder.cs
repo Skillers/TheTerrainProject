@@ -125,9 +125,12 @@ namespace Terrain.Systems
                 }
             }
 
-            // 4. Compact root ids → 0..numRegions.
+            // 4. Compact root ids → 0..numRegions. Track the lowest-index seed per region
+            //    so each Region gets a deterministic canonical seed (used later by local
+            //    re-Voronoi passes like the corner-merge pixel reshape).
             var rootToRegion = new Dictionary<int, int>();
             var seedToRegion = new int[numSeeds];
+            var regionFirstSeed = new List<int>();
             for (int i = 0; i < numSeeds; i++)
             {
                 int root = uf.Find(i);
@@ -135,6 +138,7 @@ namespace Terrain.Systems
                 {
                     rid = rootToRegion.Count;
                     rootToRegion[root] = rid;
+                    regionFirstSeed.Add(i);
                 }
                 seedToRegion[i] = rid;
             }
@@ -212,7 +216,10 @@ namespace Terrain.Systems
                 int maxX = maxs[r].x + pad;
                 int maxY = maxs[r].y + pad;
                 var rect = new RectInt(minX, minY, maxX - minX + 1, maxY - minY + 1);
-                graph.Add(new Region(r, rect));
+                var region = new Region(r, rect);
+                int2 seedPx = seeds[regionFirstSeed[r]];
+                region.SeedPx = new Vector2Int(seedPx.x, seedPx.y);
+                graph.Add(region);
             }
 
             // 6. Build adjacency by scanning right+down neighbors.

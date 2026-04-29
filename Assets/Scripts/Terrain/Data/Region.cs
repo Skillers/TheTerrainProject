@@ -8,6 +8,10 @@ namespace Terrain.Data
     {
         public int Id { get; }
         public RectInt BoundsPx { get; }
+        // Canonical seed pixel for this region — the lowest-index original Voronoi
+        // seed that mapped to this region (after seedMergeDistance unions). Used by
+        // post-Voronoi local re-rasterization, e.g. corner-merge pixel reshape.
+        public Vector2Int SeedPx { get; set; }
         public BiomeProfile Biome { get; set; }            // assigned in M2
         public float[,] HeightMap { get; private set; }    // populated in M3
         public bool[,]  HeightLock { get; private set; }   // pixels that later passes must not overwrite

@@ -39,6 +39,11 @@ namespace Terrain.Core
         [Range(0f, 1f)] public float biomeSeedFillRate = 0.9f;
         [Min(0f)] public float seedMergeDistance = 0f;
 
+        [Tooltip("World-unit distance below which adjacent Voronoi corners get merged into one. " +
+                 "Cuts duplicate corners detected on adjacent 2x2 pixel blocks around the same vertex, " +
+                 "so seams have fewer kinks and the terrain reads smoother. 0 disables.")]
+        [Range(0f, 5f)] public float cornerMergeDistance = 0f;
+
         [Header("World base layer")]
         [Min(0.0001f)] public float worldBaseScale = 0.005f;
         public float worldBaseAmplitude = 2f;

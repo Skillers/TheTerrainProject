@@ -71,6 +71,16 @@ namespace Terrain.Systems
             Dictionary<long, List<Vector2Int>> pairToCorners;
             DetectCorners(buildResult, out pairToCorners, out interiorCorners);
 
+            // Collapse close-by corner detections (multiple 2x2 blocks around a single
+            // Voronoi vertex) into one centroid each, so every pair that shares a vertex
+            // sees the same merged position downstream. Phase 2 re-rasterizes the pixel
+            // ownership in each merged cluster's window so the actual region boundaries
+            // honor the merge — thin spurs caused by close-but-distinct vertices get
+            // absorbed into the closest neighbor's seed.
+            float cornerMergePx = config.cornerMergeDistance * config.pixelsPerUnit;
+            var cornerClusters = MergeCloseCorners(pairToCorners, interiorCorners, cornerMergePx);
+            ReshapePixelsAroundClusters(buildResult, cornerClusters);
+
             // Wings sample the heightmaps for their avg-pixel snapshot. They MUST run
             // before SeamHeightApplier overwrites multi-owner pixels with the seam avg —
             // otherwise the side-blend reads the locked avg instead of the side region's
@@ -146,6 +156,256 @@ namespace Terrain.Systems
             AddBoundaryColCorners(result, dict, x: W - 1, gx: W);
 
             pairToCorners = dict;
+        }
+
+        // One merge cluster's worth of state. Centroid + radius defines the reshape window;
+        // Regions is the union of pair regions across every original corner that fell into
+        // this cluster (from pairToCorners), so the local re-Voronoi knows exactly which
+        // seeds to consider when reassigning pixels in the window.
+        private class CornerCluster
+        {
+            public Vector2Int Centroid;
+            public int RadiusPx;
+            public int MemberCount;
+            public HashSet<int> Regions = new HashSet<int>();
+        }
+
+        // Phase 1: single-link clustering of close corners. Any two within `mergeRadiusPx`
+        // collapse, chained transitively. Each cluster's int-rounded centroid replaces every
+        // member position in pairToCorners and interiorCorners (per-pair lists deduped),
+        // so duplicate detections of one Voronoi vertex stop confusing `FindFurthest`
+        // downstream. Returns one CornerCluster per multi-member cluster — those are the
+        // ones the pixel reshape pass needs to act on.
+        private static List<CornerCluster> MergeCloseCorners(
+            Dictionary<long, List<Vector2Int>> pairToCorners,
+            List<Vector2Int> interior,
+            float mergeRadiusPx)
+        {
+            if (mergeRadiusPx <= 0f) return null;
+
+            // Every interior corner also lives in pairToCorners (added in the same loop),
+            // so enumerating pair lists picks up all positions we need to cluster.
+            var posIndex = new Dictionary<Vector2Int, int>();
+            var positions = new List<Vector2Int>();
+            foreach (var list in pairToCorners.Values)
+            for (int i = 0; i < list.Count; i++)
+            {
+                var p = list[i];
+                if (posIndex.ContainsKey(p)) continue;
+                posIndex[p] = positions.Count;
+                positions.Add(p);
+            }
+            if (positions.Count < 2) return null;
+
+            var uf = new UnionFind(positions.Count);
+            float radiusSq = mergeRadiusPx * mergeRadiusPx;
+            for (int i = 0; i < positions.Count; i++)
+            for (int j = i + 1; j < positions.Count; j++)
+            {
+                int dx = positions[i].x - positions[j].x;
+                int dy = positions[i].y - positions[j].y;
+                if (dx * dx + dy * dy <= radiusSq) uf.Union(i, j);
+            }
+
+            // Centroid + member count per root.
+            var sumByRoot = new Dictionary<int, (long sx, long sy, int n)>();
+            for (int i = 0; i < positions.Count; i++)
+            {
+                int r = uf.Find(i);
+                if (sumByRoot.TryGetValue(r, out var s))
+                    sumByRoot[r] = (s.sx + positions[i].x, s.sy + positions[i].y, s.n + 1);
+                else
+                    sumByRoot[r] = (positions[i].x, positions[i].y, 1);
+            }
+
+            var rootToCluster = new Dictionary<int, CornerCluster>(sumByRoot.Count);
+            foreach (var kv in sumByRoot)
+            {
+                int n = kv.Value.n;
+                int cx = (int)((kv.Value.sx + n / 2) / n);
+                int cy = (int)((kv.Value.sy + n / 2) / n);
+                rootToCluster[kv.Key] = new CornerCluster
+                {
+                    Centroid = new Vector2Int(cx, cy),
+                    MemberCount = n,
+                };
+            }
+
+            // Per-cluster radius = max chebyshev-rounded euclid from centroid to any member.
+            for (int i = 0; i < positions.Count; i++)
+            {
+                int r = uf.Find(i);
+                var c = rootToCluster[r];
+                int dx = positions[i].x - c.Centroid.x;
+                int dy = positions[i].y - c.Centroid.y;
+                int dsq = dx * dx + dy * dy;
+                int rad = (int)System.Math.Ceiling(System.Math.Sqrt(dsq));
+                if (rad > c.RadiusPx) c.RadiusPx = rad;
+            }
+
+            // Per-cluster region set — built BEFORE we rewrite pairToCorners. A 3-region
+            // 2x2 block contributes the same position to AB, AC, BC, so walking pair keys
+            // and their corner lists picks up every region that touches each cluster.
+            foreach (var kv in pairToCorners)
+            {
+                int a = (int)(kv.Key >> 32);
+                int b = (int)(kv.Key & 0xFFFFFFFFL);
+                var list = kv.Value;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    int posIdx = posIndex[list[i]];
+                    var c = rootToCluster[uf.Find(posIdx)];
+                    c.Regions.Add(a);
+                    c.Regions.Add(b);
+                }
+            }
+
+            // Map every original position → its cluster centroid.
+            var posToCentroid = new Dictionary<Vector2Int, Vector2Int>(positions.Count);
+            for (int i = 0; i < positions.Count; i++)
+                posToCentroid[positions[i]] = rootToCluster[uf.Find(i)].Centroid;
+
+            var keys = new List<long>(pairToCorners.Keys);
+            for (int k = 0; k < keys.Count; k++)
+            {
+                var list = pairToCorners[keys[k]];
+                var seen = new HashSet<Vector2Int>();
+                var newList = new List<Vector2Int>(list.Count);
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var merged = posToCentroid[list[i]];
+                    if (seen.Add(merged)) newList.Add(merged);
+                }
+                pairToCorners[keys[k]] = newList;
+            }
+
+            var interiorSeen = new HashSet<Vector2Int>();
+            var newInterior = new List<Vector2Int>(interior.Count);
+            for (int i = 0; i < interior.Count; i++)
+            {
+                if (!posToCentroid.TryGetValue(interior[i], out var merged)) merged = interior[i];
+                if (interiorSeen.Add(merged)) newInterior.Add(merged);
+            }
+            interior.Clear();
+            interior.AddRange(newInterior);
+
+            // Only multi-member clusters need reshape — single-member clusters had nothing
+            // to merge, so their underlying pixel ownership is already consistent.
+            var multiMember = new List<CornerCluster>();
+            foreach (var kv in rootToCluster)
+                if (kv.Value.MemberCount > 1 && kv.Value.Regions.Count >= 2)
+                    multiMember.Add(kv.Value);
+            return multiMember;
+        }
+
+        // Phase 2: local re-Voronoi inside each merged cluster's window. For every pixel
+        // in (centroid ± radius+buffer), if the pixel is currently owned by a region in
+        // the cluster's region set, reassign it to the closest involved region's seed.
+        // Pixels owned by regions OUTSIDE the cluster set are left alone — those aren't
+        // ours to touch. After reassignment, AllOwners is recomputed for the changed
+        // pixels and their 4-neighbors (since AllOwners depends on neighbor PixelOwners).
+        //
+        // Effect: the thin "isthmus" pixels that produced the duplicate corner detections
+        // get absorbed into whichever neighbor's seed is closer, so the regions actually
+        // meet at the merged centroid instead of just claiming to.
+        private const int CornerReshapeBufferPx = 2;
+        private static void ReshapePixelsAroundClusters(
+            RegionBuilder.Result result, List<CornerCluster> clusters)
+        {
+            if (clusters == null || clusters.Count == 0) return;
+
+            int W = result.Width, H = result.Height;
+            var changed = new HashSet<int>();
+
+            for (int ci = 0; ci < clusters.Count; ci++)
+            {
+                var cluster = clusters[ci];
+                if (cluster.Regions.Count < 2) continue;
+
+                // Snapshot involved seed positions once per cluster.
+                var seedRegion = new List<int>(cluster.Regions.Count);
+                var seedX = new List<int>(cluster.Regions.Count);
+                var seedY = new List<int>(cluster.Regions.Count);
+                foreach (int rid in cluster.Regions)
+                {
+                    var region = result.Graph.Get(rid);
+                    if (region == null) continue;
+                    seedRegion.Add(rid);
+                    seedX.Add(region.SeedPx.x);
+                    seedY.Add(region.SeedPx.y);
+                }
+                if (seedRegion.Count < 2) continue;
+
+                int radius = cluster.RadiusPx + CornerReshapeBufferPx;
+                int xMin = Mathf.Max(0, cluster.Centroid.x - radius);
+                int yMin = Mathf.Max(0, cluster.Centroid.y - radius);
+                int xMax = Mathf.Min(W - 1, cluster.Centroid.x + radius);
+                int yMax = Mathf.Min(H - 1, cluster.Centroid.y + radius);
+
+                for (int py = yMin; py <= yMax; py++)
+                for (int px = xMin; px <= xMax; px++)
+                {
+                    int idx = py * W + px;
+                    int curOwner = result.PixelOwners[idx];
+                    if (curOwner < 0 || !cluster.Regions.Contains(curOwner)) continue;
+
+                    int bestRid = curOwner;
+                    long bestDistSq = long.MaxValue;
+                    for (int s = 0; s < seedRegion.Count; s++)
+                    {
+                        long dx = px - seedX[s];
+                        long dy = py - seedY[s];
+                        long d = dx * dx + dy * dy;
+                        if (d < bestDistSq) { bestDistSq = d; bestRid = seedRegion[s]; }
+                    }
+
+                    if (bestRid != curOwner)
+                    {
+                        result.PixelOwners[idx] = bestRid;
+                        changed.Add(idx);
+                    }
+                }
+            }
+
+            if (changed.Count == 0) return;
+
+            // Patch AllOwners for changed pixels AND their 4-neighbors — neighbors' slots
+            // could include the old owner that no longer borders them, or be missing the
+            // new owner that now does.
+            var toPatch = new HashSet<int>(changed);
+            foreach (int idx in changed)
+            {
+                int px = idx % W, py = idx / W;
+                if (px > 0)     toPatch.Add(idx - 1);
+                if (px < W - 1) toPatch.Add(idx + 1);
+                if (py > 0)     toPatch.Add(idx - W);
+                if (py < H - 1) toPatch.Add(idx + W);
+            }
+
+            foreach (int idx in toPatch)
+            {
+                int px = idx % W, py = idx / W;
+                int self = result.PixelOwners[idx];
+                int slotBase = RegionBuilder.OwnerSlots * idx;
+                for (int k = 0; k < RegionBuilder.OwnerSlots; k++) result.AllOwners[slotBase + k] = -1;
+                if (self < 0) continue;
+                result.AllOwners[slotBase] = self;
+                int slot = 1;
+                for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    if ((dx == 0) == (dy == 0)) continue;
+                    int nx = px + dx, ny = py + dy;
+                    if ((uint)nx >= (uint)W || (uint)ny >= (uint)H) continue;
+                    int cand = result.PixelOwners[ny * W + nx];
+                    if (cand < 0 || cand == self) continue;
+                    bool dup = false;
+                    for (int k = 1; k < slot; k++)
+                        if (result.AllOwners[slotBase + k] == cand) { dup = true; break; }
+                    if (!dup && slot < RegionBuilder.OwnerSlots)
+                        result.AllOwners[slotBase + slot++] = cand;
+                }
+            }
         }
 
         private static void AddBoundaryRowCorners(RegionBuilder.Result result,
